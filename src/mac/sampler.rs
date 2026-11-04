@@ -204,7 +204,7 @@ impl Sampler {
             battery: battery(),
             cpu_sensors: (chip.is_some() || report.cpu_power.is_some()).then(|| CpuSensors { temp: chip, ccds: Vec::new(), power: report.cpu_power, graphics_power: None }),
             // A Mac's fans, where it has any.
-            board: self.smc.as_ref().map(Smc::fans).filter(|fans| !fans.is_empty()).map(|fans| BoardSensors { temps: Vec::new(), fans }),
+            board: self.smc.as_ref().map(Smc::fans).filter(|fans| !fans.is_empty()).map(|fans| BoardSensors { temps: Vec::new(), fans, ..BoardSensors::default() }),
             // The internal SSD's, by its NAND channels' sensors.
             drive_temps: hottest(&temperatures, "NAND")
                 .map(|celsius| DriveTemperature { id: 0, name: self.info.drives.first().cloned().unwrap_or_default(), celsius })

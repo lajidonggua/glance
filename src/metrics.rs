@@ -101,6 +101,7 @@ pub struct Sampler {
     /// What the CPU's graphics' plane drew at the last sample (see `CpuSensors::graphics_power`).
     graphics_power: Option<f32>,
     super_io: Option<crate::superio::Watched>,
+    redmi_fans: Option<crate::redmi_fans::Watched>,
     /// The board's chip was not looked at as Glance started, another
     /// program having the bus: looked for again every so often, since when.
     super_io_awaited: Option<Instant>,
@@ -169,7 +170,9 @@ impl Sampler {
         let (adapters, gpus) = enumerate_gpus(&gpu_power);
         let cpu_key = w!(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
         let cpu_sensors = CpuReader::open();
-        let super_io = SuperIo::open(&reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardManufacturer")), &reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardProduct")));
+        let redmi_fans = crate::redmi_fans::Watched::open();
+        let super_io = if redmi_fans.is_none() { SuperIo::open(&reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardManufacturer")), &reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardProduct"))) }
+            else { Err("read by the Redmi TM2113 adapter".into()) };
         let dimms = Dimms::open();
         let dimms_awaited = (dimms.as_ref().err() == Some(&crate::dimm::Missing::BusHeld)).then(Instant::now);
         let laptop_fans = LaptopFans::open();
@@ -180,6 +183,7 @@ impl Sampler {
             format!("Memory sensors: {}", dimms.as_ref().map_or_else(|why| why.describe().to_string(), Dimms::describe)),
             format!("Laptop fans: {}", laptop_fans.as_ref().map_or_else(Clone::clone, LaptopFans::describe)),
         ];
+        if redmi_fans.is_some() { found.push("Redmi fans: TM2113 / 6800H / P1111 / IT5571 P.11; linked control".into()); }
         if let Some(failed) = crate::pawnio::last_failure() {
             found.push(format!("PawnIO, the last that failed: {failed}"));
         }
@@ -224,6 +228,7 @@ impl Sampler {
             net_prev: net_octets().map(|adapters| (adapters, Instant::now())),
             cpu_sensors,
             graphics_power: None,
+            redmi_fans,
             super_io_awaited: super_io.as_ref().err().filter(|why| crate::superio::waits_for_the_bus(why)).map(|_| Instant::now()),
             super_io: super_io.ok().map(crate::superio::Watched::new),
             laptop_fans: laptop_fans.ok(),
@@ -1480,7 +1485,7 @@ impl Sampler {
         if self.super_io_awaited.is_some_and(|since| since.elapsed() >= SUPER_IO_AGAIN) {
             self.open_board();
         }
-        let mut board = self.super_io.as_ref().map(crate::superio::Watched::read);
+        let mut board = self.redmi_fans.as_ref().map(crate::redmi_fans::Watched::read).or_else(|| self.super_io.as_ref().map(crate::superio::Watched::read));
         if let Some(fans) = &self.laptop_fans {
             board.get_or_insert_with(Default::default).fans.extend(fans.read());
         }

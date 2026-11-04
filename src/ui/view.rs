@@ -200,6 +200,8 @@ pub enum Hit {
     /// A drive's row in the storage lane: the drive opened, by its letter (not its place among the drives seen: a
     /// drive put in or taken out between the drawing and the press would move another into it).
     Drive(char),
+    /// An identified motherboard fan channel; opens its control menu.
+    FanControl(u8),
     /// A line of the lyrics turned to by the wheel (by its place among them): played from its start.
     Line(u16),
     /// A thing on the station, by its number (see `station::shelf::Item`); something copied lately, by its.
@@ -294,7 +296,7 @@ impl Hit {
 
     /// Whether a press on it opens a menu (the station's head's buttons: see `station::head_menu`).
     pub fn opens_menu(self) -> bool {
-        matches!(self, Hit::StationView | Hit::StationPages)
+        matches!(self, Hit::StationView | Hit::StationPages | Hit::FanControl(_))
     }
 
     /// Whether it is the sound's: its key, or its slider (the wheel over it turns the sound).
@@ -2412,6 +2414,8 @@ pub fn lane_height(scene: &Scene, id: &str, seen: &Seen, detail: Detail) -> Opti
 /// What a board's sensor `name` of `group` ("temps" or "fans") is called:
 /// by what it is wired to, where the board is known; else by its number.
 pub fn board_sensor(name: &str, group: &str, lang: Lang) -> String {
+    if name == "redmi_fan_1" { return lang.pick("风扇 1", "Fan 1").into(); }
+    if name == "redmi_fan_2" { return lang.pick("风扇 2", "Fan 2").into(); }
     if name.parse::<u32>().is_ok() {
         let numbered = if group == "fans" { ("风扇", "Fan") } else { ("传感器", "Sensor") };
         format!("{} {name}", lang.pick(numbered.0, numbered.1))
@@ -2745,6 +2749,34 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                 });
             }
             blocks
+        }
+        "fans" => {
+            let board = s.board.as_ref();
+            let names = scene.seen.board.as_ref().map(|b| b.fans.as_slice()).unwrap_or_default();
+            let controls = board.map(|b| b.fan_controls.as_slice()).unwrap_or_default();
+            let failed = board.is_some_and(|b| b.fan_control_failed);
+            let adjustable = controls.iter().any(|c| c.available || c.manual);
+            let mut rows: Vec<_> = names.iter().map(|name| {
+                let rpm = board.and_then(|b| b.fans.iter().find(|(n, _)| n == name)).map(|(_, rpm)| *rpm);
+                let control = controls.iter().find(|c| c.name == *name);
+                let mut value = shown(rpm, |rpm| format!("{rpm:.0} RPM"));
+                if let Some(c) = control {
+                    if c.manual {
+                        if let Some(percent) = c.percent { value.push_str(&format!(" · {percent}%")); }
+                    } else if c.available { value.push_str(lang.pick(" · 自动", " · Auto")); }
+                }
+                (board_sensor(name, "fans", lang), value, false)
+            }).collect();
+            for (i, _) in scene.seen.gpus.iter().enumerate().filter(|(_, seen)| seen.fan) {
+                rows.push((format!("GPU {}", i + 1), shown(s.gpus.get(i).and_then(|gpu| gpu.fan_rpm), |rpm| format!("{rpm} RPM")), false));
+            }
+            if rows.is_empty() { return None; }
+            let hint = if failed { lang.pick("调节未生效", "Control failed") }
+                else if board.is_some_and(|b| b.fan_control_busy) { lang.pick("其他程序控制", "Another controller") }
+                else if adjustable && controls.iter().any(|c| c.linked) { lang.pick("点击调节 · 两路联动", "Click to adjust · Linked") }
+                else if adjustable { lang.pick("点击调节", "Click to adjust") }
+                else { lang.pick("只读", "Read only") };
+            vec![head(lang.pick("风扇", "Fans"), "", hint, failed), Block::Facts { rows, gap: 0.0 }]
         }
         "board" => {
             let had = scene.seen.board.as_ref()?;
@@ -3830,6 +3862,13 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 for (i, (label, value, hot)) in rows.iter().enumerate() {
                     let row_y = y + gap + i as f32 * (LINE + FACT_GAP);
                     part(&i.to_string());
+                    if lane.id == "fans" {
+                        let value_width = frame.measure(value, theme.small).min(width * 0.65);
+                        frame.text(label, theme.small, theme.text2, left, row_y, (width - value_width - LABEL_GAP).max(0.0), Align::Start);
+                        frame.text(value, theme.small, if *hot { theme.signal } else { theme.text }, left + width - value_width, row_y, value_width, Align::End);
+                        if let Some(channel) = fan_hit(scene, i) { hits.push((left, row_y, width, LINE, Hit::FanControl(channel))); }
+                        continue;
+                    }
                     frame.text(label, theme.small, theme.text2, left, row_y, LABEL, Align::Start);
                     let color = if *hot { theme.signal } else { theme.text };
                     frame.text(value, theme.small, color, plot_left, row_y, left + width - plot_left, Align::Start);
@@ -3927,6 +3966,14 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
         frame.key("");
         y += height;
     }
+}
+
+/// Match a displayed row's stable sensor name to the latest capability.
+/// A missing reading never leaves behind a clickable control from history.
+fn fan_hit(scene: &Scene, row: usize) -> Option<u8> {
+    let name = scene.seen.board.as_ref()?.fans.get(row)?;
+    scene.history.last()?.board.as_ref()?.fan_controls.iter()
+        .find(|c| c.name == *name && (c.available || c.manual)).map(|c| c.channel)
 }
 
 /// The station's head (see `Block::Tabs`) on the head row at `top`, from `left`, `width` across: its pages' tabs,
@@ -6329,7 +6376,7 @@ otepad.exe", "Notepad"),
             system: SystemSample { uptime_s: 60, processes: 1, threads: 1, handles: 1 },
             battery: battery.map(|percent| BatterySample { percent, charging: false, plugged: false, seconds_left: None, watts: None, health: None }),
             cpu_sensors: None,
-            board: fan.map(|rpm| BoardSensors { temps: Vec::new(), fans: vec![("1".into(), rpm)] }),
+            board: fan.map(|rpm| BoardSensors { temps: Vec::new(), fans: vec![("1".into(), rpm)], ..BoardSensors::default() }),
             drive_temps: Vec::new(),
             dimm_temps: Vec::new(),
             mic_muted: None,
@@ -6420,6 +6467,35 @@ otepad.exe", "Notepad"),
     }
 
     #[test]
+    fn fans_show_in_compact_widgets_and_only_live_capabilities_open_menus() {
+        use crate::reading::FanControl;
+        let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
+        let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
+        let scene = |history: &'static [Sample]| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let mut live = sample(None, None, Some(1200.0));
+        let board = live.board.as_mut().unwrap();
+        board.fans.push(("2".into(), 0.0));
+        board.fan_controls.push(FanControl { channel: 0, name: "1".into(), percent: Some(60), manual: true, available: true, linked: false });
+        live.gpus[0].fan_rpm = Some(950);
+        for detail in [Detail::Full, Detail::Compact] {
+            let s = scene(leak(vec![live.clone()]));
+            let blocks = lane(&s, "fans", detail).unwrap();
+            assert_eq!(facts(&blocks), [("Fan 1".into(), "1200 RPM · 60%".into()), ("Fan 2".into(), "0 RPM".into()), ("GPU 1".into(), "950 RPM".into())]);
+            let fan_lane = Lane { id: "fans".into(), blocks, ink: theme.ink("fans") };
+            let mut hits = Vec::new();
+            paint_lane(&Nothing, &s, &fan_lane, Rect { x: 0.0, y: 0.0, w: COLUMN_WIDTH, h: 200.0 }, 0.0, Pass::Content, &mut hits);
+            assert_eq!(hits.iter().filter_map(|hit| if let Hit::FanControl(channel) = hit.4 { Some(channel) } else { None }).collect::<Vec<_>>(), [0]);
+            assert!(Hit::FanControl(0).opens_menu() && Hit::FanControl(0).takes_press());
+        }
+        let s = scene(leak(vec![live, sample(None, None, None)]));
+        assert_eq!(fan_hit(&s, 0), None);
+        assert!(facts(&lane(&s, "fans", Detail::Compact).unwrap()).iter().all(|(_, value)| value == UNREAD));
+        let s = scene(leak(vec![sample(None, None, Some(900.0))]));
+        assert_eq!(fan_hit(&s, 0), None); // A read-only laptop fan.
+        assert_eq!(facts(&lane(&s, "fans", Detail::Compact).unwrap()), [("Fan 1".into(), "900 RPM".into())]);
+    }
+
+    #[test]
     fn tells_readings_apart_by_what_they_are_of() {
         use crate::reading::{CpuSensors, DriveTemperature};
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
@@ -6495,7 +6571,7 @@ otepad.exe", "Notepad"),
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         let fans = |read: &[(&str, f32)]| {
             let mut s = sample(None, None, None);
-            s.board = Some(crate::reading::BoardSensors { temps: Vec::new(), fans: read.iter().map(|(n, rpm)| (n.to_string(), *rpm)).collect() });
+            s.board = Some(crate::reading::BoardSensors { temps: Vec::new(), fans: read.iter().map(|(n, rpm)| (n.to_string(), *rpm)).collect(), ..Default::default() });
             s
         };
         let cpu_fans = |prefs: &Prefs, history: &'static [Sample]| {
@@ -7751,7 +7827,7 @@ seven".into()));
     fn keeps_the_order_of_what_it_has_seen() {
         let fans = |names: &[&str]| {
             let mut s = sample(None, None, None);
-            s.board = Some(crate::reading::BoardSensors { temps: Vec::new(), fans: names.iter().map(|n| (n.to_string(), 900.0)).collect() });
+            s.board = Some(crate::reading::BoardSensors { temps: Vec::new(), fans: names.iter().map(|n| (n.to_string(), 900.0)).collect(), ..Default::default() });
             s
         };
         let order = |history: Vec<Sample>| Seen::of(&history).board.unwrap().fans;

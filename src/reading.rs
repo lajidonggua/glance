@@ -327,6 +327,31 @@ pub struct BoardSensors {
     pub temps: Vec<(String, f32)>,
     /// Fan headers that report a speed, named the same way, in RPM.
     pub fans: Vec<(String, f32)>,
+    #[serde(default)]
+    pub fan_controls: Vec<FanControl>,
+    #[serde(default)]
+    pub fan_control_failed: bool,
+    #[serde(default)]
+    pub fan_control_busy: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FanControl {
+    pub channel: u8,
+    pub name: String,
+    pub percent: Option<u8>,
+    pub manual: bool,
+    pub available: bool,
+    /// The hardware has one shared output for multiple fan tachometers.
+    #[serde(default)]
+    pub linked: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum FanCommand {
+    Automatic(u8),
+    Fixed { channel: u8, percent: u8 },
+    RestoreAll,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

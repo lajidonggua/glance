@@ -180,6 +180,7 @@ pub struct SuperIo {
     /// stopped, 0 RPM (as its firmware stops it, cool); one never seen turning reads as stopped as an empty header
     /// does, and is none.
     spun: u32,
+    control: crate::fan_control::Controller,
 }
 
 /// How long the last readings stand for the board's while another program has the bus: after, none (they would show
@@ -196,7 +197,8 @@ impl SuperIo {
         };
         let wiring = if self.layout.is_some() { "board layout known" } else { "generic input names" };
         let raw = self.raw().map(|raw| format!("; raw {raw}")).unwrap_or_default();
-        format!("{maker} chip {:04X} at {:#X}, {wiring}{raw}", self.chip, self.base)
+        let control = if self.control.available() { "known fan control interface" } else { "fans read-only" };
+        format!("{maker} chip {:04X} at {:#X}, {wiring}; {control}{raw}", self.chip, self.base)
     }
 
     /// A Nuvoton monitor's registers as they read, for a report: where a
@@ -265,7 +267,12 @@ impl SuperIo {
                 seen.push(format!("{port:#X}: chip {chip:04X} with its monitor at {base:#X}, not usable"));
                 continue;
             }
-            let mut found = SuperIo { module, kind, chip, layout: layout(vendor, board, chip), base, port, slot, ec_temps: Vec::new(), ec_fans: Vec::new(), last: (BoardSensors::default(), Instant::now()), spun: 0 };
+            let control = match kind {
+                Kind::Nuvoton { fans, .. } => crate::fan_control::Controller::nuvoton(chip, fans),
+                Kind::Ite { fans, .. } => crate::fan_control::Controller::ite(chip, fans, vendor),
+                Kind::NuvotonEc => crate::fan_control::Controller::default(),
+            };
+            let mut found = SuperIo { module, kind, chip, layout: layout(vendor, board, chip), base, port, slot, ec_temps: Vec::new(), ec_fans: Vec::new(), last: (BoardSensors::default(), Instant::now()), spun: 0, control };
             let failed = match kind {
                 Kind::NuvotonEc => found.set_up_ec().err(),
                 // A Nuvoton monitor that answers is one from Nuvoton.
@@ -436,8 +443,33 @@ impl SuperIo {
                 }
             }
         }
+        let mut control = std::mem::take(&mut self.control);
+        let temperature = sensors.temps.iter().map(|(_, t)| *t).reduce(f32::max);
+        let name = |channel: u8| self.name(channel as usize, |layout| layout.fans);
+        control.maintain(self, self.spun, temperature, |channel| sensors.fans.iter().find(|(n, _)| *n == name(channel)).map(|(_, rpm)| *rpm), Instant::now());
+        sensors.fan_controls = control.readings(self, self.spun, temperature, name);
+        sensors.fan_control_failed = control.failed;
+        self.control = control;
         self.last = (sensors.clone(), Instant::now());
         sensors
+    }
+
+    fn control(&mut self, command: crate::reading::FanCommand) -> bool {
+        // Retain a request to restore even when another program holds the
+        // bus. The next successful sampling pass retries it before PWM work.
+        self.control.relinquish(command);
+        let Some(_lock) = NamedLock::acquire(ISA_LOCK, PATIENCE) else { return false };
+        let temperature = (self.last.1.elapsed() < std::time::Duration::from_secs(3))
+            .then(|| self.last.0.temps.iter().map(|(_, t)| *t).reduce(f32::max)).flatten();
+        let mut control = std::mem::take(&mut self.control);
+        let okay = control.apply(self, command, self.spun, temperature).is_ok();
+        if okay { control.failed = false; }
+        if !okay {
+            control.failed = true;
+            control.restore_all(self);
+        }
+        self.control = control;
+        okay
     }
 
     /// Whether a Nuvoton monitor answers as Nuvoton's.
@@ -472,6 +504,20 @@ impl SuperIo {
     }
 }
 
+impl crate::fan_control::Registers for SuperIo {
+    fn get(&self, register: u16) -> Result<u8, ()> { self.register(register).ok_or(()) }
+    fn put(&self, register: u16, value: u8) -> Result<(), ()> {
+        if matches!(self.kind, Kind::NuvotonEc) { return Err(()); }
+        let out = |port, value: u64| self.module.call("ioctl_pio_outb", &[port, value], &mut []).map(|_| ()).map_err(|_| ());
+        if matches!(self.kind, Kind::Nuvoton { .. }) {
+            out(self.base + ADDRESS_OFFSET, NUVOTON_BANK as u64)?;
+            out(self.base + DATA_OFFSET, (register >> 8) as u64)?;
+        }
+        out(self.base + ADDRESS_OFFSET, (register & 0xff) as u64)?;
+        out(self.base + DATA_OFFSET, value as u64)
+    }
+}
+
 const ISA_LOCK: windows::core::PCWSTR = windows::core::w!("Global\\Access_ISABUS.HTP.Method");
 
 /// How many times the chip was read, and how many of those the bus was another program's all the while it was
@@ -501,13 +547,26 @@ impl Watched {
     pub fn new(mut chip: SuperIo) -> Self {
         let (latest, stop) = (Arc::new(Mutex::new(BoardSensors::default())), Arc::new(AtomicBool::new(false)));
         let (kept, stopped) = (latest.clone(), stop.clone());
+        let (commands, requests) = std::sync::mpsc::channel::<crate::fan_control::Task>();
+        crate::fan_control::register(commands);
         std::thread::Builder::new().name("glance: board chip".into()).spawn(move || {
             while !stopped.load(Ordering::Relaxed) {
                 let began = std::time::Instant::now();
                 let read = chip.read(PATIENCE);
                 *kept.lock().unwrap() = read;
-                std::thread::sleep(EVERY.saturating_sub(began.elapsed()));
+                while !stopped.load(Ordering::Relaxed) {
+                    match requests.recv_timeout(EVERY.saturating_sub(began.elapsed())) {
+                        Ok(task) => {
+                            let restore = matches!(task.command, crate::reading::FanCommand::RestoreAll | crate::reading::FanCommand::Automatic(_));
+                            let okay = (restore || Instant::now() < task.until) && chip.control(task.command);
+                            let _ = task.reply.send(okay);
+                            if began.elapsed() >= EVERY { break; }
+                        }
+                        Err(_) => break,
+                    }
+                }
             }
+            chip.control(crate::reading::FanCommand::RestoreAll);
         }).expect("a thread started");
         Watched { latest, stop }
     }

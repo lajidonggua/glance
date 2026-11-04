@@ -29,6 +29,7 @@ give it, or torn off onto the desktop.
 - **Processes**: the busiest programs by CPU, memory, I/O or GPU
 - **Storage**: space on each drive
 - **Motherboard**: temperatures and fan speeds
+- **Fans**: a separate RPM panel and desktop widget; automatic or fixed output on [supported controllers](docs/fan-control.md), including linked control on the validated Redmi Book Pro 15 2022 firmware
 - **Battery**, on laptops: its charge, the power going in or out (on battery, what the whole machine draws) and its health
 - **Time and media** (off until chosen): the time and the date (on a 12-hour clock if you like), the sound's level on a track you drag, with mute, and what is playing, paused, played and skipped
 - **WSL and Docker**, for developers (off until chosen, under *More modules*): WSL 2's processors, memory and GPU and the distributions running, read from Windows alone so that no distribution is started or kept running; the containers Docker's current engine runs, each with its processors, memory, network and disk
@@ -266,10 +267,9 @@ Reports from Intel and Nuvoton machines are welcome: **Settings → System →
 Diagnostics → Copy** puts what Glance found on your machine, and which readings it gets,
 on the clipboard, with the latest lines of its log, ready to paste into an
 issue (no paths or names in it). The log itself is `glance.log`, beside the
-settings in `%APPDATA%\dev.weiyi.glance`. On laptops, fans and
-board temperatures belong to the laptop's embedded controller and are not
-shown, except an ASUS laptop's fans, which its firmware reports; integrated graphics draw from the CPU package, whose power the CPU
-lane shows.
+settings in `%APPDATA%\dev.weiyi.glance`. Laptop fan support depends on the
+model-specific firmware; see the [fan adapters](docs/fan-control.md).
+Integrated graphics draw from the CPU package, whose power the CPU lane shows.
 
 ## Build
 

@@ -51,6 +51,23 @@ static EDGES: Mutex<Option<Edges>> = Mutex::new(None);
 /// told (for one waiting on an answer).
 static SWITCHES: Mutex<[(Option<bool>, u64); 3]> = Mutex::new([(None, 0), (None, 0), (None, 0)]);
 
+static FAN_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static FAN_REPLIES: Mutex<std::collections::BTreeMap<u64, std::sync::mpsc::SyncSender<bool>>> = Mutex::new(std::collections::BTreeMap::new());
+
+/// Runs off the drawing thread. Match an acknowledgement to this request,
+/// rather than treating a newer sample as proof that hardware was changed.
+pub fn control_fan(command: crate::reading::FanCommand) -> bool {
+    if !linked() { return crate::fan_control::request(command); }
+    let sequence = FAN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let (reply, answer) = std::sync::mpsc::sync_channel(1);
+    FAN_REPLIES.lock().unwrap().insert(sequence, reply);
+    let until_ms = unsafe { windows::Win32::System::SystemInformation::GetTickCount64() }.saturating_add(3000);
+    ask(&Asked::FanControl { sequence, until_ms, command });
+    let okay = answer.recv_timeout(Duration::from_secs(4)).unwrap_or(false);
+    FAN_REPLIES.lock().unwrap().remove(&sequence);
+    okay
+}
+
 fn slot(switch: Switch) -> usize {
     match switch {
         Switch::Autostart => 0,
@@ -166,9 +183,9 @@ fn as_first(mut sample: Sample) -> Sample {
 fn greeted(link: &Link) -> Option<StaticInfo> {
     // (They may be starting: installing their driver, looking at the hardware first; not waited for for ever.)
     match crate::link::receive_within::<Told>(&link.told, STARTED_WITHIN) {
-        Some(Told::Hello { version, info, .. }) if version == env!("CARGO_PKG_VERSION") => Some(info),
+        Some(Told::Hello { version, info, .. }) if version == crate::link::VERSION => Some(info),
         Some(Told::Hello { version, .. }) => {
-            crate::journal::note(format!("readings: the sensors running are of Glance {version}, not {}", env!("CARGO_PKG_VERSION")));
+            crate::journal::note(format!("readings: the sensors running are of Glance {version}, not {}", crate::link::VERSION));
             None
         }
         _ => None,
@@ -280,6 +297,9 @@ impl Source {
                             let kept = &mut switches[slot(switch)];
                             *kept = (Some(on), kept.1 + 1);
                         }
+                        Some(Told::FanControlled { sequence, okay }) => {
+                            if let Some(reply) = FAN_REPLIES.lock().unwrap().remove(&sequence) { let _ = reply.send(okay); }
+                        }
                         Some(Told::Updating(state)) => crate::update::set_state(state),
                         Some(Told::Note(line)) => crate::journal::note(line),
                         Some(Told::Buttons { down, pressed }) => crate::panel::heard_buttons(down, pressed),
@@ -287,6 +307,7 @@ impl Source {
                         Some(Told::Hello { .. }) => {}
                         None => {
                             LINKED.store(false, Ordering::Relaxed);
+                            FAN_REPLIES.lock().unwrap().clear();
                             *ASKING.lock().unwrap() = None;
                             let lasted = LINKED_SINCE.lock().unwrap().take().is_some_and(|since| since.elapsed() >= LASTED_TO_START_AGAIN);
                             // The link let go of, and the process it was to gone, before they are started again: a pipe

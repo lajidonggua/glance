@@ -761,7 +761,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let (sw, sh) = (script.width as f32 / px, script.height as f32 / px);
     let mut known = vec!["game".to_string(), "cpu".to_string()];
     known.extend(info.gpu_modules());
-    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "wsl", "docker"].map(String::from));
+    known.extend(["memory", "network", "disk", "processes", "storage", "board", "fans", "battery", "system", "time", "wsl", "docker"].map(String::from));
     if shot.workbench {
         known.extend(["station", "notes", "apps"].map(String::from));
         pretend_workbench(lang, &folder.join("props"))?;
@@ -1239,6 +1239,7 @@ pub(crate) fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: 
                 ("vsoc".into(), 39.0 + 6.0 * busy),
             ],
             fans: vec![("cpu_fan".into(), 950.0 + 900.0 * busy), ("system_fan_2".into(), 880.0 + 500.0 * busy)],
+            ..BoardSensors::default()
         }),
         drive_temps: info.drives.first().map(|name| DriveTemperature { id: 0, name: name.clone(), celsius: 34.0 + 9.0 * busy }).into_iter().collect(),
         dimm_temps: vec![35.0 + 7.0 * busy, 34.0 + 7.0 * busy],
@@ -1311,7 +1312,7 @@ pub fn frames(wallpaper: &str) -> Result<(), String> {
     let desktop = wallpaper::picture(wallpaper, width, height).map_err(|e| format!("{wallpaper}: {e}"))?;
     let mut known = vec!["game".to_string(), "cpu".to_string()];
     known.extend(info.gpu_modules());
-    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "wsl", "docker"].map(String::from));
+    known.extend(["memory", "network", "disk", "processes", "storage", "board", "fans", "battery", "system", "time", "wsl", "docker"].map(String::from));
     let prefs = Prefs::resolve(&serde_json::Value::Null, &known);
     let history: Vec<Sample> = (0..400).map(|i| made_up(&info, 1_760_000_000_000.0 + i as f64 * 1000.0, i as u64, 0.4, None)).collect();
     let theme = Theme::new(Skin::Glass, true);
@@ -1603,7 +1604,7 @@ fn panel_memory(gfx: &Gfx, surface: &mut crate::ui::gfx::Surface, window: window
     let info = crate::metrics::Sampler::new().info;
     let mut known = vec!["game".to_string(), "cpu".to_string()];
     known.extend(info.gpu_modules());
-    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "wsl", "docker"].map(String::from));
+    known.extend(["memory", "network", "disk", "processes", "storage", "board", "fans", "battery", "system", "time", "wsl", "docker"].map(String::from));
     let prefs = Prefs::resolve(&serde_json::Value::Null, &known);
     let history: Vec<Sample> = (0..400).map(|i| made_up(&info, 1_760_000_000_000.0 + i as f64 * 1000.0, i as u64, 0.4, None)).collect();
     let theme = Theme::new(skin, true);

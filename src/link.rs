@@ -15,6 +15,7 @@ use std::os::windows::io::FromRawHandle;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+
 use windows::core::{HSTRING, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE};
 use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
@@ -26,9 +27,13 @@ use windows::Win32::System::Threading::{OpenProcess, OpenProcessToken, QueryFull
 use crate::presents::GameMode;
 use crate::reading::{Sample, StaticInfo};
 
+/// Replace an older helper before sending fan-control commands.
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/fans-v1");
+
 /// What the sensors tell.
 #[derive(Serialize, Deserialize)]
 pub enum Told {
+    FanControlled { sequence: u64, okay: bool },
     /// As they start: their version, what the machine is, and what they found to read it with (for a report).
     Hello { version: String, info: StaticInfo, found: Vec<String> },
     /// What they read, each time they read.
@@ -92,6 +97,8 @@ pub struct ReleaseSent {
 /// What the sensors are asked.
 #[derive(Serialize, Deserialize)]
 pub enum Asked {
+    /// A bounded request. `until_ms` is Windows uptime, shared across processes.
+    FanControl { sequence: u64, until_ms: u64, command: crate::reading::FanCommand },
     /// The first thing the rest says, as it comes: its version (the sensors serve only their own version's rest:
     /// another's makes them go, for the rest to start its own).
     Hello { version: String },
@@ -442,7 +449,7 @@ impl Link {
         if server != other || !is_sensors_elevated(server) {
             return None;
         }
-        send(&mut link.asked, &Asked::Hello { version: env!("CARGO_PKG_VERSION").into() }).then_some(link)
+        send(&mut link.asked, &Asked::Hello { version: VERSION.into() }).then_some(link)
     }
 
     /// The sensors' process at the other end, waited for (its handle, taken while the link is still had, so that

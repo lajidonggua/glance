@@ -507,7 +507,7 @@ impl Controller {
         // The game in front first, while there is one.
         let mut known = vec!["game".to_string(), "cpu".to_string()];
         known.extend(self.info.gpu_modules());
-        known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "lyrics", "wsl", "docker"].map(String::from));
+        known.extend(["memory", "network", "disk", "processes", "storage", "board", "fans", "battery", "system", "time", "lyrics", "wsl", "docker"].map(String::from));
         known
     }
 
@@ -1259,7 +1259,7 @@ impl Controller {
                     // A button of its station's head: its menu.
                     if let Some((hit, tab)) = widgets.take_menu_asked() {
                         self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
-                        menu = cursor_position().and_then(|at| crate::station::head_menu(hit, tab, at, panels.iter().any(Panel::is_shown), widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::StationHead(choices, Some(msg.hwnd))));
+                        menu = cursor_position().and_then(|at| content_menu(hit, tab, at, panels.iter().any(Panel::is_shown), widgets.look_of(msg.hwnd), Some(msg.hwnd)));
                         keep_menu_above(&menu, &mut overlay);
                     }
                 }
@@ -1386,7 +1386,7 @@ impl Controller {
                     let hit = panels[at].hit_at(lparam_point(msg.lParam)).unwrap();
                     panels[at].click(lparam_point(msg.lParam));
                     self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
-                    menu = cursor_position().and_then(|point| crate::station::head_menu(hit, panels[at].tab, point, true, panels[at].menu_look())).map(|(open, choices)| (open, MenuFor::StationHead(choices, None)));
+                    menu = cursor_position().and_then(|point| content_menu(hit, panels[at].tab, point, true, panels[at].menu_look(), None));
                     menu_of = Some(at);
                     keep_menu_above(&menu, &mut overlay);
                 }
@@ -1626,6 +1626,7 @@ fn keep_menu_above(menu: &Option<(crate::ui::menu::Menu, MenuFor)>, overlay: &mu
 /// What a menu up is for: the tray icon's (with what each of its choices is), the widget's at a window, or the
 /// overlay's.
 enum MenuFor {
+    FanControl(Vec<crate::reading::FanCommand>),
     Tray(Vec<usize>),
     Widget(HWND),
     Overlay,
@@ -1641,6 +1642,14 @@ enum MenuFor {
     App(crate::station::apps::App, Vec<crate::station::AppChoice>),
     /// A note stuck on the desktop, by its name, and what each row does (see `Widgets::note_menu`).
     Note(String, Vec<crate::ui::note::Choice>),
+}
+
+/// Content menus share the same release path in a panel and in a desktop widget.
+fn content_menu(hit: Hit, tab: crate::ui::view::Tab, at: POINT, with_panel: bool, look: crate::ui::menu::Look, widget: Option<HWND>) -> Option<(crate::ui::menu::Menu, MenuFor)> {
+    if let Hit::FanControl(channel) = hit {
+        return crate::fan_control::menu(channel, at, with_panel, look).map(|(menu, choices)| (menu, MenuFor::FanControl(choices)));
+    }
+    crate::station::head_menu(hit, tab, at, with_panel, look).map(|(menu, choices)| (menu, MenuFor::StationHead(choices, widget)))
 }
 
 impl Controller {
@@ -1693,6 +1702,13 @@ impl Controller {
             panel.menu_closed();
         }
         match of {
+            MenuFor::FanControl(choices) => {
+                if let Some(command) = choice.and_then(|row| choices.get(row)).copied() {
+                    std::thread::spawn(move || {
+                        if !crate::source::control_fan(command) { crate::journal::note("fan control: the requested setting could not be confirmed"); }
+                    });
+                }
+            }
             MenuFor::Tray(choices) => crate::tray::chosen(choice, &choices),
             MenuFor::Widget(hwnd) => {
                 if let Some(crate::widget::WidgetChoice::Settings) = choice.and_then(|row| widgets.chose(hwnd, row)) {

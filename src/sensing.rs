@@ -68,10 +68,10 @@ pub fn run() {
             _ => Err("it said nothing first".into()),
         };
         let pid = match checked {
-            Ok((pid, version)) if version == env!("CARGO_PKG_VERSION") => pid,
+            Ok((pid, version)) if version == crate::link::VERSION => pid,
             // Another version's Glance: it starts the sensors of its own version once these have gone.
             Ok((_, version)) => {
-                crate::journal::note(format!("sensors: Glance {version} came, these are {}: going, for its own", env!("CARGO_PKG_VERSION")));
+                crate::journal::note(format!("sensors: Glance {version} came, these are {}: going, for its own", crate::link::VERSION));
                 break;
             }
             Err(why) => {
@@ -85,7 +85,7 @@ pub fn run() {
         crate::presents::set_partner(pid);
         let telling = Arc::new(Mutex::new(told));
         let tell = |told: &Told| link::tell(&mut telling.lock().unwrap(), told);
-        let hello = Told::Hello { version: env!("CARGO_PKG_VERSION").into(), info: sampler.info.clone(), found: sampler.info.found.clone() };
+        let hello = Told::Hello { version: crate::link::VERSION.into(), info: sampler.info.clone(), found: sampler.info.found.clone() };
         let greeted = tell(&hello)
             && tell(&Told::Buttons { down: crate::mouse::buttons_held(), pressed: false })
             && tell(&Told::Switched { switch: Switch::Autostart, on: crate::elevation::autostart_enabled() })
@@ -103,6 +103,12 @@ pub fn run() {
                     match asking {
                         // (Said once, first; heard again, it is nothing.)
                         Asked::Hello { .. } => {}
+                        Asked::FanControl { sequence, until_ms, command } => {
+                            let left = until_ms.saturating_sub(unsafe { windows::Win32::System::SystemInformation::GetTickCount64() });
+                            let restore = matches!(command, crate::reading::FanCommand::RestoreAll | crate::reading::FanCommand::Automatic(_));
+                            let okay = (restore || left > 0) && crate::fan_control::request_within(command, Duration::from_millis(if restore { 3000 } else { left.min(3000) }));
+                            tell(&Told::FanControlled { sequence, okay });
+                        }
                         Asked::Want(wanted) => *want.lock().unwrap() = wanted.checked(),
                         Asked::GameMode(mode) => crate::presents::set_game_mode(mode.into()),
                         Asked::Report => {
@@ -130,6 +136,7 @@ pub fn run() {
                         Asked::Activity(on) => HEARING_ACTIVITY.store(on, std::sync::atomic::Ordering::Relaxed),
                     }
                 }
+                crate::fan_control::request(crate::reading::FanCommand::RestoreAll);
             }
         }).expect("a thread started");
         // The pushes seen from now on, told to it.
@@ -181,6 +188,7 @@ pub fn run() {
         let _ = listener.join();
     }
     crate::presents::stop();
+    crate::fan_control::request(crate::reading::FanCommand::RestoreAll);
 }
 
 /// When the reading under way began, in time awake (see `awake`; none: none is).

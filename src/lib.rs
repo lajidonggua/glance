@@ -8,6 +8,10 @@ mod asus;
 mod lenovo;
 #[cfg(windows)]
 mod battery;
+#[cfg(windows)]
+mod fan_control;
+#[cfg(windows)]
+mod redmi_fans;
 mod detector;
 #[cfg(windows)]
 mod push;
@@ -607,6 +611,7 @@ pub fn run() {
     search::keep_all();
     saved_all();
     presents::stop_started();
+    source::control_fan(reading::FanCommand::RestoreAll);
     journal::written();
     // The other threads end with the process.
     std::process::exit(0);
@@ -672,6 +677,17 @@ fn saved_all() {
 /// `glance-sensors.exe`: the sensors, told over the link to Glance running as the user (see `sensing`).
 #[cfg(windows)]
 pub fn run_sensors() {
+    if std::env::args().nth(1).as_deref() == Some("--redmi-fan-guardian") { redmi_fans::guardian(); return; }
+    #[cfg(feature = "studio")]
+    if std::env::args().nth(1).as_deref() == Some("--redmi-fan-read") {
+        if let Some(path) = std::env::args_os().nth(2) { redmi_fans::diagnose(std::path::Path::new(&path)); }
+        return;
+    }
+    #[cfg(feature = "studio")]
+    if let Some(flag) = std::env::args().nth(1).filter(|f| f == "--redmi-fan-verify" || f == "--redmi-fan-verify-crash") {
+        if let Some(path) = std::env::args_os().nth(2) { redmi_fans::verify_control(std::path::Path::new(&path), flag.ends_with("-crash")); }
+        return;
+    }
     // The one multithreaded apartment, as in `run`.
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);

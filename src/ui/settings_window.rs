@@ -3946,6 +3946,7 @@ impl Ui {
                 Some(p("未能读取主板传感器，原因见“通用”页中的诊断信息", "This board's sensors could not be read. The diagnostics on the General page say why")),
             ),
             "board" => (p("主板", "Motherboard"), (!info.board.is_empty()).then(|| info.board.clone())),
+            "fans" => (p("风扇", "Fans"), Some(p("转速；支持调节的风扇可点击选择自动或固定输出", "Fan speeds. Click a supported fan to choose automatic or fixed output"))),
             "battery" => (p("电池", "Battery"), Some(p("电量、充放电功率与健康度", "Charge, power and health"))),
             "game" => (p("游戏", "Game"), Some(p("全屏游戏的帧率、帧时间与资源占用", "A fullscreen game's frame rate, frame times and use"))),
             "docker" => ("Docker".into(), Some(p("运行中容器的处理器、内存、网络与磁盘占用，仅在 Docker 运行时显示", "What each running container uses of the processor, memory, network and disk, shown only while Docker runs"))),
@@ -4041,6 +4042,7 @@ impl Ui {
         let present = match id.split(':').next().unwrap_or(id) {
             "battery" => seen.battery,
             "board" => seen.board.is_some(),
+            "fans" => seen.board.as_ref().is_some_and(|b| !b.fans.is_empty()) || seen.gpus.iter().any(|g| g.fan),
             "gpu" => gpu.as_ref().is_some_and(|(_, seen)| seen.present),
             _ => true,
         };

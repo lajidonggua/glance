@@ -186,6 +186,14 @@ impl Seen {
                 news.extend(theirs.temps.into_iter().filter(|name| !ours.temps.contains(name)).map(Item::BoardTemp));
                 news.extend(theirs.fans.into_iter().filter(|name| !ours.fans.contains(name)).map(Item::BoardFan));
             }
+            "fans" => {
+                let (ours, theirs) = (self.board.clone().unwrap_or_default(), other.board.clone().unwrap_or_default());
+                news.extend(theirs.fans.into_iter().filter(|name| !ours.fans.contains(name)).map(Item::BoardFan));
+                for (index, theirs) in other.gpus.iter().enumerate() {
+                    let ours = self.gpus.get(index).cloned().unwrap_or_default();
+                    if !ours.fan && theirs.fan { news.push(Item::Gpu(index, GpuItem::Fan)); }
+                }
+            }
             "battery" => {
                 flag(self.battery, other.battery, Item::Battery);
                 flag(self.battery_power, other.battery_power, Item::BatteryPower);
