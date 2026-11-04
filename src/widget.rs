@@ -2217,6 +2217,11 @@ impl Widgets {
                 self.menu_asked = Some((hit, self.list[index].content.tab()));
                 return;
             }
+            Released::SortProcesses(sort) => {
+                // Saving broadcasts the new preference back to the input thread.
+                std::thread::spawn(move || crate::app().set_process_sort(sort));
+                return;
+            }
             Released::Nothing => return,
         }
         self.save();
@@ -2817,6 +2822,8 @@ enum Released {
     Full,
     /// One of its station's head's buttons pressed: its menu asked for.
     Menu(view::Hit),
+    /// A process-table heading pressed: keep its sort as the panel does.
+    SortProcesses(crate::ui::prefs::ProcessSort),
 }
 
 enum Frame {
@@ -3811,6 +3818,10 @@ impl Widget {
     /// Let go: a press where it was is a click (on a button, what it does); a move, flung if fast enough. Cancelled
     /// (the capture taken away), neither: what was pressed is not done, and it stays where it was.
     fn release(&mut self, now: Instant, cancelled: bool) -> Released {
+        self.release_at(now, cancelled, cursor_position())
+    }
+
+    fn release_at(&mut self, now: Instant, cancelled: bool, cursor: Option<POINT>) -> Released {
         // (Its own capture: not one another has taken since, a part torn out of it.)
         if unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetCapture() } == self.window.hwnd {
             let _ = unsafe { ReleaseCapture() };
@@ -3868,7 +3879,7 @@ impl Widget {
                 // A note pulled off the panel let go over it again: back to its card there; elsewhere, a note where it is
                 // put down (not flung: as it is let go, it is still settling into a note).
                 if let Some(pulled) = &mut self.pulled {
-                    if pulled.wants(cursor_position()) == 0.0 {
+                    if pulled.wants(cursor) == 0.0 {
                         note("widget: a note pulled off the panel let go over it, going back");
                         let to = |at: i32, card: i32| {
                             let mut spring = Spring::at(at as f32, GOING_BACK.0, GOING_BACK.1);
@@ -3888,7 +3899,7 @@ impl Widget {
                 if !moved {
                     // A press let go where it was: a button, if it was on one.
                     let px = self.contact.scale * self.zoom;
-                    let Some(cursor) = cursor_position() else { return Released::Nothing };
+                    let Some(cursor) = cursor else { return Released::Nothing };
                     let (x, y) = ((cursor.x - self.at.x) as f32 / px, (cursor.y - self.at.y) as f32 / px);
                     crate::perf::mark(|| format!("widget let go at {x:.0},{y:.0} on {:?}", self.button_at(x, y)));
                     return match self.button_at(x, y) {
@@ -3914,6 +3925,12 @@ impl Widget {
                             match self.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).map(|hit| hit.4) {
                                 Some(view::Hit::Media(key, follow)) => crate::playing::act_on(follow, crate::playing::Act::Key(key)),
                                 Some(view::Hit::Drive(letter)) => crate::panel::open_drive(letter),
+                                Some(view::Hit::Sort(sort)) => {
+                                    if let Some(readings) = self.content.readings_mut() {
+                                        readings.scrolls.set(view::List::Processes, 0.0);
+                                    }
+                                    return Released::SortProcesses(sort);
+                                }
                                 Some(hit) if crate::station::pressed(hit) => {}
                                 Some(view::Hit::Tab(tab)) => {
                                     if let Some(readings) = self.content.readings_mut() {
@@ -5189,6 +5206,49 @@ fn rounded(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Vec<Point> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_headings_sort_widgets_when_released() {
+        use crate::ui::prefs::ProcessSort;
+        let _device = gfx::held().unwrap();
+        let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
+        let contact = Contact { monitor: RECT { left: 0, top: 0, right: 1920, bottom: 1080 }, work: RECT { left: 0, top: 0, right: 1920, bottom: 1040 }, scale: 1.5 };
+        let mut widget = Widget::new(contact, POINT { x: 400, y: 300 }, Content::Readings(Readings::new(choice))).unwrap();
+        widget.surface_size = (360.0, 240.0);
+        widget.zoom = 1.25;
+        widget.hits_from = (16.0, 24.0);
+        let sorts = [ProcessSort::Cpu, ProcessSort::Memory, ProcessSort::Io, ProcessSort::Gpu];
+        widget.hits = sorts.iter().enumerate().map(|(i, sort)| (100.0 + i as f32 * 50.0, 60.0, 40.0, 24.0, view::Hit::Sort(*sort))).collect();
+        for pinned in [false, true] {
+            widget.pinned = pinned;
+            for scale in [1.0, 1.5] {
+                widget.contact.scale = scale;
+                for (i, sort) in sorts.iter().enumerate() {
+                    let (x, y) = (120.0 + i as f32 * 50.0 + widget.hits_from.0, 72.0 + widget.hits_from.1);
+                    assert!(matches!(widget.takes_at(x, y), Takes::Pressed | Takes::Whole));
+                    let px = widget.contact.scale * widget.zoom;
+                    let cursor = POINT { x: widget.at.x + (x * px).round() as i32, y: widget.at.y + (y * px).round() as i32 };
+                    for cancelled in [true, false] {
+                        let scrolls = &mut widget.content.readings_mut().unwrap().scrolls;
+                        scrolls.set(view::List::Processes, 120.0);
+                        scrolls.set(view::List::Notes, 80.0);
+                        widget.drag = Some(Drag::Move { grab: POINT::default(), trail: Vec::new(), torn: false, moved: false });
+                        let released = widget.release_at(Instant::now(), cancelled, Some(cursor));
+                        let scrolls = widget.content.scrolls();
+                        if cancelled {
+                            assert!(matches!(released, Released::Nothing));
+                            assert_eq!(scrolls.at(view::List::Processes), 120.0);
+                        } else {
+                            assert!(matches!(released, Released::SortProcesses(chosen) if chosen == *sort), "{sort:?}, pinned={pinned}, scale={scale}");
+                            assert_eq!(scrolls.at(view::List::Processes), 0.0);
+                            assert_eq!(scrolls.to(view::List::Processes), 0.0);
+                        }
+                        assert_eq!(scrolls.at(view::List::Notes), 80.0);
+                    }
+                }
+            }
+        }
+    }
 
     /// A note pulled off the panel is its card while the pointer is over the panel, and a note off it (none to be had:
     /// off it). Held where it was pressed on its card, across by share as it grows; down, as far as on its card while it
