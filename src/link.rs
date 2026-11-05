@@ -28,7 +28,7 @@ use crate::presents::GameMode;
 use crate::reading::{Sample, StaticInfo};
 
 /// Replace an older helper before sending fan-control commands.
-pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/fans-v1");
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/fans-v2");
 
 /// What the sensors tell.
 #[derive(Serialize, Deserialize)]
@@ -97,6 +97,7 @@ pub struct ReleaseSent {
 /// What the sensors are asked.
 #[derive(Serialize, Deserialize)]
 pub enum Asked {
+    FanRules(crate::fan_settings::FanRules),
     /// A bounded request. `until_ms` is Windows uptime, shared across processes.
     FanControl { sequence: u64, until_ms: u64, command: crate::reading::FanCommand },
     /// The first thing the rest says, as it comes: its version (the sensors serve only their own version's rest:

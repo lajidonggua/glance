@@ -14,6 +14,7 @@ use windows::core::w;
 use crate::pawnio::Module;
 use crate::reading::{BoardSensors, FanCommand, FanControl};
 use crate::sensors::NamedLock;
+use crate::fan_settings::FanRules;
 
 const ISA: windows::core::PCWSTR = w!("Global\\Access_ISABUS.HTP.Method");
 const OWNER: windows::core::PCWSTR = w!("Global\\RedmiFanControl.TM2113.ControlOwner");
@@ -127,25 +128,51 @@ struct State { flags: u8, targets: [u8; 2], pwm: [u8; 2], rpm: [u16; 2], valid: 
 impl State { fn manual(&self) -> bool { self.flags & MANUAL != 0 } }
 
 fn raw(percent: u8) -> Result<u8, ()> {
-    if !(40..=100).contains(&percent) { return Err(()); }
+    if percent != 0 && !(20..=100).contains(&percent) { return Err(()); }
     Ok(if percent == 100 { 127 } else { ((percent as u32 * 128 + 50) / 100).min(126) as u8 })
 }
 fn percent(value: u8) -> u8 { if value == 127 { 100 } else { ((value as u32 * 100 + 64) / 128) as u8 } }
 fn belongs(state: &State, allowed: &[u8]) -> bool { !state.manual() || state.targets.iter().all(|v| allowed.contains(v)) }
+#[cfg(test)]
 fn output(requested: u8, temperature: f32) -> Result<u8, ()> {
-    if !temperature.is_finite() || !(5.0..95.0).contains(&temperature) { return Err(()); }
-    raw(if temperature >= 80.0 { 100 } else { requested })
+    output_with(FanRules::default(), requested, temperature)
+}
+fn output_with(rules: FanRules, requested: u8, temperature: f32) -> Result<u8, ()> {
+    raw(requested)?;
+    if !rules.valid() || !temperature.is_finite() || !(5.0..rules.restore_at as f32).contains(&temperature) { return Err(()); }
+    raw(requested.max(rules.minimum(temperature)))
 }
 
 #[derive(Default)]
-struct Protection { fault: bool, stalled: Option<Instant> }
+struct Policy { prepared: bool, starting: Option<Instant>, stalled: Option<Instant> }
+impl Policy {
+    fn next(&mut self, rules: FanRules, requested: u8, t: f32, rpm: [u16; 2], now: Instant) -> Result<u8, ()> {
+        let target = output_with(rules, requested, t)?;
+        if target == 0 { *self = Self::default(); return Ok(0); }
+        if rpm.iter().all(|rpm| *rpm > 0) { self.prepared = true; self.starting = None; self.stalled = None; return Ok(target); }
+        if !self.prepared { self.prepared = true; self.starting = Some(now); }
+        let limit = if self.starting.is_some() { 8 } else { 5 };
+        if now.duration_since(*self.stalled.get_or_insert(now)) >= Duration::from_secs(limit) { return Err(()); }
+        let boost = self.starting.map_or(0, |start| match now.duration_since(start).as_secs() { 0 => 0, 1 => 30, 2 => 40, 3 => 60, 4 => 80, _ => 100 });
+        Ok(target.max(raw(boost)?))
+    }
+}
+
+#[derive(Default)]
+struct Protection { fault: bool, stalled: Option<Instant>, unsafe_since: Option<Instant> }
 impl Protection {
+    #[cfg(test)]
     fn trips(&mut self, now: Instant, since: Instant, disconnected: bool, temperature: Result<f32, ()>, state: &Result<State, ()>) -> bool {
-        let stopped = state.as_ref().is_ok_and(|s| s.rpm.contains(&0));
-        let stall = if stopped { now.duration_since(*self.stalled.get_or_insert(now)) >= Duration::from_secs(8) }
+        self.trips_with(FanRules::default(), now, since, disconnected, temperature, state)
+    }
+    fn trips_with(&mut self, rules: FanRules, now: Instant, since: Instant, disconnected: bool, temperature: Result<f32, ()>, state: &Result<State, ()>) -> bool {
+        let stopped = state.as_ref().is_ok_and(|s| s.targets.iter().all(|v| *v > 0) && s.rpm.contains(&0));
+        let stall = if stopped { now.duration_since(*self.stalled.get_or_insert(now)) >= Duration::from_secs(12) }
             else { self.stalled = None; false };
+        let too_low = temperature.ok().zip(state.as_ref().ok()).is_some_and(|(t,s)| s.targets.iter().any(|v| *v < raw(rules.minimum(t)).unwrap_or(127)));
+        let unsafe_output = if too_low { now.duration_since(*self.unsafe_since.get_or_insert(now)) >= Duration::from_secs(3) } else { self.unsafe_since = None; false };
         self.fault |= disconnected || now.duration_since(since) >= Duration::from_secs(4) || temperature.is_err()
-            || temperature.is_ok_and(|t| !t.is_finite() || !(5.0..95.0).contains(&t)) || state.is_err() || stall;
+            || !rules.valid() || temperature.is_ok_and(|t| !t.is_finite() || !(5.0..rules.restore_at as f32).contains(&t)) || state.is_err() || stall || unsafe_output;
         self.fault
     }
 }
@@ -180,7 +207,7 @@ fn restore(io: &impl ControlIo, allowed: &[u8]) -> Result<(), ()> {
 /// Its stdin closes when the worker dies; a stalled worker stops renewing
 /// its lease. It samples CPU temperature and RPM independently.
 #[derive(Clone, Serialize, Deserialize)]
-struct Ticket { sequence: u64, allowed: Vec<u8>, armed: bool }
+struct Ticket { sequence: u64, allowed: Vec<u8>, armed: bool, rules: FanRules }
 
 struct Guard { child: Child, input: ChildStdin, replies: mpsc::Receiver<u64>, sequence: u64 }
 
@@ -199,12 +226,12 @@ impl Guard {
             }
         });
         let mut guard = Self { child, input, replies, sequence: 0 };
-        guard.tell(&[], false)?;
+        guard.tell(&[], false, FanRules::default())?;
         Ok(guard)
     }
-    fn tell(&mut self, allowed: &[u8], armed: bool) -> Result<(), ()> {
+    fn tell(&mut self, allowed: &[u8], armed: bool, rules: FanRules) -> Result<(), ()> {
         self.sequence += 1;
-        let ticket = Ticket { sequence: self.sequence, allowed: allowed.to_vec(), armed };
+        let ticket = Ticket { sequence: self.sequence, allowed: allowed.to_vec(), armed, rules };
         serde_json::to_writer(&mut self.input, &ticket).map_err(|_| ())?;
         self.input.write_all(b"\n").and_then(|_| self.input.flush()).map_err(|_| ())?;
         let until = Instant::now() + Duration::from_secs(2);
@@ -227,11 +254,11 @@ pub fn guardian() {
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {
             if line.len() > 1024 { break; }
             let Ok(ticket) = serde_json::from_str::<Ticket>(&line) else { break };
-            if ticket.allowed.len() > 3 || ticket.allowed.iter().any(|v| *v > 127) || (ticket.armed && ticket.allowed.is_empty()) { break; }
+            if !ticket.rules.valid() || ticket.allowed.len() > 3 || ticket.allowed.iter().any(|v| *v > 127) || (ticket.armed && ticket.allowed.is_empty()) { break; }
             if sent.send(ticket).is_err() { break; }
         }
     });
-    let mut ticket = Ticket { sequence: 0, allowed: Vec::new(), armed: false };
+    let mut ticket = Ticket { sequence: 0, allowed: Vec::new(), armed: false, rules: FanRules::default() };
     let mut since = Instant::now();
     let mut protection = Protection::default();
     loop {
@@ -251,7 +278,7 @@ pub fn guardian() {
         if ticket.armed {
             let t = hw.temperature();
             let state = hw.session().and_then(|s| s.snapshot());
-            if protection.trips(Instant::now(), since, disconnected, t, &state) {
+            if protection.trips_with(ticket.rules, Instant::now(), since, disconnected, t, &state) {
                 // Retain the ticket and retry if the bus is busy. Never clear
                 // a manual target that no longer belongs to this worker.
                 if let Ok(session) = hw.session() {
@@ -268,47 +295,51 @@ pub fn guardian() {
 
 struct Worker {
     hw: Hardware, guard: Option<Guard>,
-    owned: Option<u8>, requested: u8, recovering: bool, failed: bool, stalled: Option<Instant>,
+    owned: Option<u8>, requested: u8, recovering: bool, failed: bool, rules: FanRules, policy: Policy,
     allowed: BTreeSet<u8>,
 }
 
 impl Worker {
-    fn new(hw: Hardware) -> Self { Self { hw, guard: None, owned: None, requested: 40, recovering: false, failed: false, stalled: None, allowed: BTreeSet::new() } }
+    fn new(hw: Hardware) -> Self { Self { hw, guard: None, owned: None, requested: 40, recovering: false, failed: false, rules: FanRules::default(), policy: Policy::default(), allowed: BTreeSet::new() } }
     fn recover(&mut self) -> bool {
         if self.owned.is_none() && self.allowed.is_empty() { return true; }
         self.recovering = true;
         let allowed: Vec<_> = self.allowed.iter().copied().collect();
         let okay = self.hw.session().and_then(|s| restore(&s, &allowed)).is_ok();
         if okay {
-            if let Some(guard) = &mut self.guard { let _ = guard.tell(&[], false); }
-            self.guard = None; self.owned = None; self.allowed.clear(); self.recovering = false; self.stalled = None;
+            if let Some(guard) = &mut self.guard { let _ = guard.tell(&[], false, self.rules); }
+            self.guard = None; self.owned = None; self.allowed.clear(); self.recovering = false; self.policy = Policy::default();
         }
         okay
     }
     fn command(&mut self, command: FanCommand, until: Instant) -> bool {
         match command {
+            FanCommand::Rules(rules) => { if !rules.valid() { return false; } self.rules = rules; return true; }
             FanCommand::Automatic(0) | FanCommand::RestoreAll => return self.recover(),
             FanCommand::Fixed { channel: 0, percent: requested } if raw(requested).is_ok() => {
                 let Ok(t) = self.hw.temperature() else { self.failed = true; self.recover(); return false };
-                if t >= 95.0 || self.recovering { self.failed = true; self.recover(); return false; }
-                let target = match output(requested, t) { Ok(target) => target, Err(_) => { self.failed = true; self.recover(); return false; } };
-                if self.guard.is_none() { self.guard = Guard::start().ok(); }
-                let Some(guard) = &mut self.guard else { return false };
-                self.allowed.insert(target);
-                if let Some(old) = self.owned { self.allowed.insert(old); }
-                let allowed: Vec<_> = self.allowed.iter().copied().collect();
-                if guard.tell(&allowed, true).is_err() { self.failed = true; self.recover(); return false; }
-                let result = self.hw.session().and_then(|s| {
-                    if Instant::now() >= until { return Err(()); }
-                    set(&s, target, self.owned)
-                });
-                if result.is_err() { self.failed = true; self.recover(); return false; }
-                self.owned = Some(target); self.requested = requested; self.allowed = BTreeSet::from([target]);
-                self.failed = false;
-                return true;
+                let state = self.hw.session().and_then(|s| s.snapshot());
+                let target = state.and_then(|s| self.policy.next(self.rules, requested, t, s.rpm, Instant::now()));
+                let Ok(target) = target else { self.failed = true; self.recover(); return false };
+                if self.recovering || !self.apply_target(target, until) { return false; }
+                self.requested = requested; return true;
             }
             _ => return false,
         }
+    }
+    fn apply_target(&mut self, target: u8, until: Instant) -> bool {
+        if self.guard.is_none() { self.guard = Guard::start().ok(); }
+        let Some(guard) = &mut self.guard else { self.policy = Policy::default(); return false };
+        self.allowed.insert(target);
+        if let Some(old) = self.owned { self.allowed.insert(old); }
+        let allowed: Vec<_> = self.allowed.iter().copied().collect();
+        if guard.tell(&allowed, true, self.rules).is_err() { self.failed = true; self.recover(); return false; }
+        let result = self.hw.session().and_then(|s| {
+            if Instant::now() >= until { return Err(()); }
+            set(&s, target, self.owned)
+        });
+        if result.is_err() { self.failed = true; self.recover(); return false; }
+        self.owned = Some(target); self.allowed = BTreeSet::from([target]); self.failed = false; true
     }
     fn read(&mut self) -> BoardSensors {
         let temperature = self.hw.temperature().ok();
@@ -319,20 +350,19 @@ impl Worker {
             let external = state.manual() && !state.targets.iter().all(|v| self.allowed.contains(v));
             if controlling && (external || (!state.manual() && !self.recovering && self.owned.is_some())) {
                 // Firmware or another controller took over. Disarm without writing.
-                if let Some(guard) = &mut self.guard { let _ = guard.tell(&[], false); }
-                self.guard = None; self.owned = None; self.allowed.clear(); self.failed = true;
+                if let Some(guard) = &mut self.guard { let _ = guard.tell(&[], false, self.rules); }
+                self.guard = None; self.owned = None; self.allowed.clear(); self.failed = true; self.policy = Policy::default();
             }
         }
         if self.owned.is_some() || !self.allowed.is_empty() {
-            let stopped = state.as_ref().is_ok_and(|s| s.rpm.contains(&0));
-            let stalled = if stopped { self.stalled.get_or_insert_with(Instant::now).elapsed() >= Duration::from_secs(5) } else { self.stalled = None; false };
-            if self.recovering || temperature.is_none_or(|t| t >= 95.0) || state.is_err() || stalled {
+            let next = temperature.ok_or(()).and_then(|t| state.as_ref().map_err(|_| ()).and_then(|s| self.policy.next(self.rules, self.requested, t, s.rpm, Instant::now())));
+            if self.recovering || next.is_err() {
                 self.failed = true; self.recover(); changed = true;
             } else {
                 // Renew the independent lease even if no output change is needed.
-                let next = output(self.requested, temperature.unwrap()).unwrap();
-                if self.owned != Some(next) { self.command(FanCommand::Fixed { channel: 0, percent: self.requested }, Instant::now() + Duration::from_secs(3)); changed = true; }
-                else if self.guard.as_mut().is_none_or(|g| g.tell(&self.allowed.iter().copied().collect::<Vec<_>>(), true).is_err()) { self.failed = true; self.recover(); changed = true; }
+                let next = next.unwrap();
+                if self.owned != Some(next) { self.apply_target(next, Instant::now() + Duration::from_secs(3)); changed = true; }
+                else if self.guard.as_mut().is_none_or(|g| g.tell(&self.allowed.iter().copied().collect::<Vec<_>>(), true, self.rules).is_err()) { self.failed = true; self.recover(); changed = true; }
             }
         }
         // A command above may have restored or changed targets; publish real readback.
@@ -345,7 +375,8 @@ impl Worker {
         for (i, name) in ["redmi_fan_1", "redmi_fan_2"].into_iter().enumerate() {
             board.fans.push((name.into(), state.rpm[i] as f32));
             board.fan_controls.push(FanControl { channel: 0, name: name.into(), percent: self.owned.map(percent), manual: self.owned.is_some(),
-                available: free && state.valid && temperature.is_some_and(|t| t < 95.0) && (!state.manual() || self.owned.is_some()), linked: true });
+                available: free && state.valid && temperature.is_some_and(|t| t < self.rules.restore_at as f32) && (!state.manual() || self.owned.is_some()), linked: true,
+                can_stop: true, requested_percent: self.owned.map(|_| self.requested) });
         }
         board
     }
@@ -429,6 +460,39 @@ pub fn verify_control(path: &std::path::Path, crash: bool) {
     let _ = std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap());
 }
 
+/// Explicit low-output check: at most a few seconds per preset, automatic
+/// restoration after each. Actual stop is tested only below 45°C.
+#[cfg(feature = "studio")]
+pub fn verify_low(path: &std::path::Path) {
+    let result = (|| {
+        let hw = Hardware::open().ok_or("hardware unavailable")?;
+        let mut worker = Worker::new(hw);
+        let mut checks = Vec::new();
+        for requested in [20,30,0] {
+            let t = worker.hw.temperature().map_err(|_| "no temperature")?;
+            let before = worker.hw.session().and_then(|s| s.snapshot()).map_err(|_| "no reading")?;
+            if t >= 70.0 || before.manual() { return Err("keep automatic: temperature or existing manual control"); }
+            if requested == 0 && t >= 45.0 { checks.push(serde_json::json!({"requested":0,"skipped":"actual stop requires CPU below 45 C in this diagnostic","temperature":t})); continue; }
+            if !worker.command(FanCommand::Fixed { channel: 0, percent: requested }, Instant::now() + Duration::from_secs(3)) { worker.recover(); return Err("control not confirmed"); }
+            let mut readings = Vec::new();
+            for _ in 0..(if requested == 0 { 12 } else { 4 }) {
+                std::thread::sleep(Duration::from_millis(500));
+                let t = worker.hw.temperature().ok();
+                if t.is_none_or(|t| t >= if requested == 0 { 48.0 } else { 75.0 }) { break; }
+                let board = worker.read(); readings.push(serde_json::json!({"temperature":t,"fans":board.fans,"controls":board.fan_controls}));
+                if worker.failed || worker.owned.is_none() { break; }
+            }
+            let restored = worker.recover();
+            let after = worker.hw.session().and_then(|s| s.snapshot()).ok();
+            checks.push(serde_json::json!({"requested":requested,"readings":readings,"restored":restored,"after":after}));
+            if !restored { return Err("restore not confirmed; guardian retains recovery ticket"); }
+        }
+        Ok(serde_json::json!({"checks":checks}))
+    })();
+    let report = match result { Ok(report) => report, Err(why) => serde_json::json!({"aborted":why}) };
+    let _ = std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,7 +524,8 @@ mod tests {
         restore(&io, &[target]).unwrap();
         assert_eq!((io.state.borrow().flags, io.state.borrow().targets), (0xa1, [0, 0]));
         assert_eq!((raw(40), raw(60), raw(80), raw(100)), (Ok(51), Ok(77), Ok(102), Ok(127)));
-        assert!(raw(0).is_err() && raw(101).is_err());
+        assert_eq!((raw(0), raw(20), raw(30)), (Ok(0), Ok(26), Ok(38)));
+        assert!(raw(10).is_err() && raw(101).is_err());
     }
     #[test]
     fn a_partial_write_is_recoverable_but_external_control_is_preserved() {
@@ -486,10 +551,45 @@ mod tests {
         assert!(Protection::default().trips(now, now, true, Ok(45.0), &state));
         assert!(Protection::default().trips(now + Duration::from_secs(4), now, false, Ok(45.0), &state));
         assert!(Protection::default().trips(now, now, false, Ok(45.0), &Err(())));
-        let mut stopped = state.unwrap(); stopped.rpm[1] = 0;
+        let mut stopped = state.unwrap(); stopped.rpm[1] = 0; stopped.targets = [26,26];
         let mut protection = Protection::default();
         assert!(!protection.trips(now, now, false, Ok(45.0), &Ok(stopped.clone())));
-        assert!(protection.trips(now + Duration::from_secs(8), now + Duration::from_secs(8), false, Ok(45.0), &Ok(stopped)));
+        assert!(protection.trips(now + Duration::from_secs(12), now + Duration::from_secs(12), false, Ok(45.0), &Ok(stopped)));
         assert_eq!((output(40, 79.0), output(40, 80.0), output(40, 95.0)), (Ok(51), Ok(127), Err(())));
+    }
+    #[test]
+    fn intentional_stop_is_not_a_stall_and_warming_restarts_both_fans() {
+        let r = FanRules::default(); let now = Instant::now(); let mut p = Policy::default();
+        for seconds in [0,5,60,600] { assert_eq!(p.next(r, 0, 49.0, [0,0], now + Duration::from_secs(seconds)), Ok(0)); }
+        assert_eq!(p.next(r, 0, 50.0, [0,0], now + Duration::from_secs(601)), Ok(26));
+        assert_eq!(p.next(r, 0, 60.0, [1200,1200], now + Duration::from_secs(602)), Ok(38));
+        assert_eq!(p.next(r, 20, 80.0, [1200,1200], now + Duration::from_secs(603)), Ok(127));
+        assert!(p.next(r, 0, 95.0, [1200,1200], now).is_err());
+        let state = State { flags: 8, targets: [0,0], pwm: [0,0], rpm: [0,0], valid: true };
+        let mut guard = Protection::default();
+        assert!(!guard.trips(now, now, false, Ok(49.0), &Ok(state.clone())));
+        assert!(!guard.trips(now + Duration::from_secs(60), now + Duration::from_secs(60), false, Ok(49.0), &Ok(state.clone())));
+        assert!(!guard.trips(now + Duration::from_secs(61), now + Duration::from_secs(61), false, Ok(50.0), &Ok(state.clone())));
+        assert!(guard.trips(now + Duration::from_secs(64), now + Duration::from_secs(64), false, Ok(50.0), &Ok(state)));
+    }
+    #[test]
+    fn low_speed_startup_tries_the_target_then_boosts_only_until_both_turn() {
+        let r = FanRules::default(); let now = Instant::now(); let mut p = Policy::default();
+        for (seconds, expected) in [26,38,51,77,102,127].into_iter().enumerate() {
+            assert_eq!(p.next(r, 20, 45.0, [0,0], now + Duration::from_secs(seconds as u64)), Ok(expected));
+        }
+        assert_eq!(p.next(r, 20, 45.0, [1200,1300], now + Duration::from_secs(6)), Ok(26));
+        assert_eq!(p.next(r, 20, 45.0, [0,1300], now + Duration::from_secs(7)), Ok(26));
+        assert!(p.next(r, 20, 45.0, [0,1300], now + Duration::from_secs(12)).is_err());
+        let mut failed = Policy::default();
+        assert!(failed.next(r, 30, 45.0, [0,0], now).is_ok());
+        assert!(failed.next(r, 30, 45.0, [0,0], now + Duration::from_secs(8)).is_err());
+    }
+    #[test]
+    fn worker_and_guardian_use_the_same_custom_thresholds() {
+        let rules = FanRules { stop_below: 40, boost_at: 65, full_at: 75, restore_at: 90 };
+        assert_eq!((output_with(rules,0,39.0),output_with(rules,0,40.0),output_with(rules,20,65.0),output_with(rules,20,75.0),output_with(rules,20,90.0)), (Ok(0),Ok(26),Ok(38),Ok(127),Err(())));
+        let now = Instant::now(); let state = fake().state();
+        assert!(Protection::default().trips_with(rules, now, now, false, Ok(90.0), &state));
     }
 }

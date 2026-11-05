@@ -455,6 +455,9 @@ impl SuperIo {
     }
 
     fn control(&mut self, command: crate::reading::FanCommand) -> bool {
+        if let crate::reading::FanCommand::Rules(rules) = command {
+            if !rules.valid() { return false; } self.control.rules = rules; return true;
+        }
         // Retain a request to restore even when another program holds the
         // bus. The next successful sampling pass retries it before PWM work.
         self.control.relinquish(command);

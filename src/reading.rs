@@ -345,10 +345,15 @@ pub struct FanControl {
     /// The hardware has one shared output for multiple fan tachometers.
     #[serde(default)]
     pub linked: bool,
+    #[serde(default)]
+    pub can_stop: bool,
+    #[serde(default)]
+    pub requested_percent: Option<u8>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum FanCommand {
+    Rules(crate::fan_settings::FanRules),
     Automatic(u8),
     Fixed { channel: u8, percent: u8 },
     RestoreAll,

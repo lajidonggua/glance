@@ -52,11 +52,17 @@ static EDGES: Mutex<Option<Edges>> = Mutex::new(None);
 static SWITCHES: Mutex<[(Option<bool>, u64); 3]> = Mutex::new([(None, 0), (None, 0), (None, 0)]);
 
 static FAN_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static FAN_RULES_SENT: Mutex<Option<crate::fan_settings::FanRules>> = Mutex::new(None);
 static FAN_REPLIES: Mutex<std::collections::BTreeMap<u64, std::sync::mpsc::SyncSender<bool>>> = Mutex::new(std::collections::BTreeMap::new());
 
 /// Runs off the drawing thread. Match an acknowledgement to this request,
 /// rather than treating a newer sample as proof that hardware was changed.
 pub fn control_fan(command: crate::reading::FanCommand) -> bool {
+    if matches!(command, crate::reading::FanCommand::Fixed { .. }) {
+        let rules = crate::app().settings.lock().unwrap().fans.rules.checked();
+        if linked() { ask(&Asked::FanRules(rules)); }
+        else if !crate::fan_control::request(crate::reading::FanCommand::Rules(rules)) { return false; }
+    }
     if !linked() { return crate::fan_control::request(command); }
     let sequence = FAN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let (reply, answer) = std::sync::mpsc::sync_channel(1);
@@ -194,6 +200,7 @@ fn greeted(link: &Link) -> Option<StaticInfo> {
 
 /// From now on what is asked goes over `link`; nothing asked of the sensors before is taken to be known to them.
 fn linked_to(link: &Link) {
+    *FAN_RULES_SENT.lock().unwrap() = None;
     if let Ok(mut asking) = link.asked.try_clone() {
         // (Its thread ends as the link is replaced or lost: what sends to it is dropped then.)
         let (ask, asked) = std::sync::mpsc::channel::<Vec<u8>>();
@@ -273,6 +280,11 @@ impl Source {
     /// failing that, Glance reads what it can itself from then on, and watches the edges itself. The sensors'
     /// process watches `edges` meanwhile, and tells each push it sees.
     pub fn next(&mut self, want: Want, edges: Edges) -> Option<Sample> {
+        let rules = crate::app().settings.lock().unwrap().fans.rules.checked();
+        if *FAN_RULES_SENT.lock().unwrap() != Some(rules) {
+            if linked() { ask(&Asked::FanRules(rules)); *FAN_RULES_SENT.lock().unwrap() = Some(rules); }
+            else if crate::fan_control::request(crate::reading::FanCommand::Rules(rules)) { *FAN_RULES_SENT.lock().unwrap() = Some(rules); }
+        }
         match self {
             Source::Linked(held) => {
                 let link = held.as_mut().expect("a link");
@@ -307,6 +319,7 @@ impl Source {
                         Some(Told::Hello { .. }) => {}
                         None => {
                             LINKED.store(false, Ordering::Relaxed);
+                            *FAN_RULES_SENT.lock().unwrap() = None;
                             FAN_REPLIES.lock().unwrap().clear();
                             *ASKING.lock().unwrap() = None;
                             let lasted = LINKED_SINCE.lock().unwrap().take().is_some_and(|since| since.elapsed() >= LASTED_TO_START_AGAIN);

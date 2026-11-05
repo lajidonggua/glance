@@ -103,6 +103,7 @@ pub fn run() {
                     match asking {
                         // (Said once, first; heard again, it is nothing.)
                         Asked::Hello { .. } => {}
+                        Asked::FanRules(rules) => { if rules.valid() { crate::fan_control::request(crate::reading::FanCommand::Rules(rules)); } }
                         Asked::FanControl { sequence, until_ms, command } => {
                             let left = until_ms.saturating_sub(unsafe { windows::Win32::System::SystemInformation::GetTickCount64() });
                             let restore = matches!(command, crate::reading::FanCommand::RestoreAll | crate::reading::FanCommand::Automatic(_));

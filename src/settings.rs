@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+pub use crate::fan_settings::FanSettings;
 #[cfg(windows)]
 #[cfg(not(test))]
 use windows::Win32::System::Com::CoTaskMemFree;
@@ -686,6 +687,7 @@ impl MusicRooms {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub fans: FanSettings,
     /// What each screen edge opens; none, in settings from before (see `carry_over`).
     #[serde(default)]
     pub places: Option<Places>,
@@ -899,6 +901,7 @@ impl StationSettings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            fans: FanSettings::default(),
             places: Some(Places::default()),
             edge: Edge::default(),
             pushed: true,
@@ -1174,6 +1177,20 @@ pub fn merged(held: &Settings, base: &Settings, mine: &Settings) -> Settings {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fan_menu_and_threshold_changes_merge_and_reload_independently() {
+        let base = super::Settings::default();
+        let mut held = base.clone(); held.fans.rules.full_at = 75;
+        let mut mine = base.clone(); mine.fans.toggle(4);
+        let merged = super::merged(&held, &base, &mine);
+        assert_eq!(merged.fans.rules.full_at, 75);
+        assert!(merged.fans.presets().contains(&50));
+        let (loaded, omitted) = super::read(&serde_json::to_string(&merged).unwrap());
+        assert!(omitted.is_empty());
+        assert_eq!(loaded.fans, merged.fans);
+        assert!(loaded.fans.rules.valid());
+        assert_eq!(super::read("{}").0.fans, crate::fan_settings::FanSettings::default());
+    }
     use super::*;
 
     /// The overlay shows when it is asked to, each way read back as it was set, and offered once it was.

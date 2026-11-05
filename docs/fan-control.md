@@ -4,8 +4,11 @@ Enable **Fans** in Settings, or drag its heading onto the desktop. Both
 the panel and the desktop widget show each fan's measured RPM, including
 zero for a stopped fan. A missing reading is `—`. GPU fans are read-only.
 
-Click a supported fan's row to choose **Restore automatic**, **40%**,
-**60%**, **80%** or **100%** output. These are output percentages, not
+Click a supported fan's row to choose **Restore automatic** or an output
+preset. Defaults are **0/20/30/40/60/80/100%**. Expand the Fans settings
+card to choose the menu presets (including optional 50/70/90%) and thermal
+thresholds. Zero output is offered only by the validated Redmi adapter.
+These are output percentages, not
 target RPM. Settings are never applied automatically after restarting.
 The menu's check and the reading come from hardware acknowledgement.
 
@@ -41,12 +44,26 @@ RedmiFanControl is running, Glance can still show RPM but says **Another
 controller**. Exit that tool normally before using Glance's adjustment menu;
 there is no need to stop its processes forcibly.
 
-At 80°C CPU Tctl, requested output becomes 100%. At 95°C, missing CPU or
-RPM readings, a five-second stall or a lost UI connection, the worker
+Default CPU Tctl thresholds are: stop only below 50°C, at least 20% from
+50°C, at least 30% from 60°C, 100% from 80°C, and automatic recovery at
+95°C. Settings offer stop at 35–55°C, the 30% floor at 60–70°C, full output
+at 75–85°C and recovery at 90–95°C. Invalid or unordered rules cannot raise
+the hard 95°C ceiling. The worker and guardian receive the same validated
+rules; manual output is never started simply by saving preferences.
+The menu checks the requested preset while the row shows effective output.
+
+Intentional zero output while cool is not a stall. Starting a stopped fan
+tries the temperature-constrained output for a second, then progressively
+boosts to at least 30/40/60/80/100% only while a fan remains stopped. Both
+turning ends the boost immediately. Failure to start within eight seconds
+restores automatic; a later sustained stall still has a five-second limit.
+At the recovery threshold, missing CPU or
+RPM readings, a stall or a lost UI connection, the worker
 restores automatic. An independent `glance-sensors.exe` guardian holds the
 ownership lock and a recovery ticket before the first manual write. It
 also reads CPU temperature and RPM, restores after a four-second lost
-worker lease or an eight-second stall, and handles an unexpected worker
+worker lease, twelve seconds without turning under nonzero output, or
+three seconds below the configured cooling floor, and handles an unexpected worker
 exit. A fault cannot silently re-arm that guardian. Recovery changes only
 the owned mode bit and targets; unrelated flags are preserved. If another
 controller changes the targets, Glance relinquishes ownership instead of
@@ -62,8 +79,9 @@ writing, verifies writes, and restores those values when automatic is
 selected or Glance exits normally. A disconnected UI also requests restore.
 Partial writes and failed restores retain their recovery state for a retry.
 
-At a maximum reported board temperature of 80°C, output becomes 100%; at
-90°C, missing temperature, or five seconds without a turning fan, the
+At the configured full-output board temperature (default 80°C), output
+becomes 100%; recovery is capped at 90°C for these adapters. Missing
+temperature or five seconds without a turning fan also make the
 worker requests restore. These are board sensor readings, not an assurance
 that every component's temperature is covered. Unlike the Redmi adapter,
 these motherboard adapters do not yet have independent crash recovery. If

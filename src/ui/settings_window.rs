@@ -942,6 +942,7 @@ fn module_fields(id: &str) -> &'static [Field] {
     match id {
         "network" => &[Field::RateUnit, Field::PingTarget],
         "processes" => &[Field::ProcessCount],
+        "fans" => &[Field::FanPresets, Field::FanStop, Field::FanBoost, Field::FanFull, Field::FanRestore],
         "station" => &[Field::StationKeep, Field::StationCopy, Field::StationAfterDrag],
         _ => &[],
     }
@@ -1078,6 +1079,11 @@ enum Field {
     /// What the music widgets are drawn on (see `prefs::MusicGround`).
     MusicGround,
     ProcessCount,
+    FanPresets,
+    FanStop,
+    FanBoost,
+    FanFull,
+    FanRestore,
     Interval,
     Span,
     TempAlert,
@@ -3290,6 +3296,17 @@ impl Ui {
                 vec![s("封面", "Cover"), s("跟随外观", "Skin"), s("无", "None")],
                 MusicGround::ALL.iter().position(|&ground| ground == prefs.music.ground),
             ),
+            Field::FanPresets => (pick(lang, "菜单档位（可多选）", "Menu presets (multiple)"), crate::fan_settings::PRESETS.iter().map(|p| format!("{p}%")).collect(), None),
+            Field::FanStop | Field::FanBoost | Field::FanFull | Field::FanRestore => {
+                let rules = settings.fans.rules.checked();
+                let (name, values, value): (&'static str, &[u8], u8) = match field {
+                    Field::FanStop => (pick(lang, "低于此温度允许停转", "Fan stop below"), &[35,40,45,50,55], rules.stop_below),
+                    Field::FanBoost => (pick(lang, "达到此温度至少30%", "At least 30% from"), &[60,65,70], rules.boost_at),
+                    Field::FanFull => (pick(lang, "达到此温度满速", "Full speed from"), &[75,80,85], rules.full_at),
+                    _ => (pick(lang, "达到此温度恢复自动", "Restore automatic from"), &[90,95], rules.restore_at),
+                };
+                (name, values.iter().map(|v| format!("{v} °C")).collect(), values.iter().position(|v| *v == value))
+            }
             Field::ProcessCount => (
                 pick(lang, "显示进程数", "Processes shown"),
                 vec!["5".into(), "8".into(), "12".into()],
@@ -3345,6 +3362,11 @@ impl Ui {
             Field::RateUnit => prefs.network.bits = index == 1,
             Field::PingTarget => prefs.network.ping = Some(prefs::PingTarget::ALL[index]),
             Field::MusicGround => prefs.music.ground = MusicGround::ALL[index],
+            Field::FanPresets => settings.fans.toggle(index),
+            Field::FanStop => { settings.fans.rules = settings.fans.rules.checked(); settings.fans.rules.stop_below = [35,40,45,50,55][index]; }
+            Field::FanBoost => { settings.fans.rules = settings.fans.rules.checked(); settings.fans.rules.boost_at = [60,65,70][index]; }
+            Field::FanFull => { settings.fans.rules = settings.fans.rules.checked(); settings.fans.rules.full_at = [75,80,85][index]; }
+            Field::FanRestore => { settings.fans.rules = settings.fans.rules.checked(); settings.fans.rules.restore_at = [90,95][index]; }
             Field::ProcessCount => prefs.processes.count = [5, 8, 12][index],
             Field::Interval => settings.interval_ms = [500, 1000, 2000][index],
             Field::Span => prefs.chart_seconds = [30.0, 60.0, 120.0, 300.0][index],
@@ -3946,7 +3968,7 @@ impl Ui {
                 Some(p("未能读取主板传感器，原因见“通用”页中的诊断信息", "This board's sensors could not be read. The diagnostics on the General page say why")),
             ),
             "board" => (p("主板", "Motherboard"), (!info.board.is_empty()).then(|| info.board.clone())),
-            "fans" => (p("风扇", "Fans"), Some(p("转速；支持调节的风扇可点击选择自动或固定输出", "Fan speeds. Click a supported fan to choose automatic or fixed output"))),
+            "fans" => (p("风扇", "Fans"), Some(p("展开可选菜单档位和温度规则；停转与低速规则适用于 Redmi 两路联动", "Expand for menu presets and thermal rules; fan stop and low-speed rules apply to linked Redmi fans"))),
             "battery" => (p("电池", "Battery"), Some(p("电量、充放电功率与健康度", "Charge, power and health"))),
             "game" => (p("游戏", "Game"), Some(p("全屏游戏的帧率、帧时间与资源占用", "A fullscreen game's frame rate, frame times and use"))),
             "docker" => ("Docker".into(), Some(p("运行中容器的处理器、内存、网络与磁盘占用，仅在 Docker 运行时显示", "What each running container uses of the processor, memory, network and disk, shown only while Docker runs"))),
@@ -5646,7 +5668,12 @@ impl Ui {
         }
         for (i, ((sx, sw, line_cy), option)) in spans.iter().zip(options).enumerate() {
             let target = Target::Choice(field, i);
-            let lit = chosen == Some(i) || *hovered == Some(target.clone());
+            let selected = chosen == Some(i) || (field == Field::FanPresets && self.settings.fans.presets().contains(&crate::fan_settings::PRESETS[i]));
+            if field == Field::FanPresets && selected {
+                fill(frame, palette.control_on, *sx, line_cy - 14.0, *sw, 28.0, 4.0);
+                stroke_outside(frame, Rect { x: *sx, y: line_cy - 14.0, w: *sw, h: 28.0 }, 4.0, palette.control_ring, 1.0);
+            }
+            let lit = selected || *hovered == Some(target.clone());
             let color = match (enabled, lit) {
                 (false, _) => palette.text3,
                 (true, true) => palette.text,
@@ -6482,6 +6509,36 @@ fn skin_miniature(frame: &Frame, skin: Skin, r: Rect) {
 #[cfg(all(test, feature = "studio"))]
 mod pictures {
     use super::*;
+
+    #[test]
+    #[ignore = "renders the fan settings on this PC's graphics card"]
+    fn draws_fan_presets_and_thermal_settings() {
+        let _pretending = crate::pretending();
+        let (gfx, hwnd) = pretended();
+        with_ui(|ui| {
+            ui.page = Page::Monitor; ui.tab = Tab::Shown; ui.lang = Lang::Zh;
+            ui.settings.fans = crate::fan_settings::FanSettings::default();
+            ui.prefs.modules.retain(|m| m.id == "fans");
+            for module in &mut ui.prefs.modules { module.on = true; }
+            ui.set_open("fans", true, true);
+            let rows = ui.rows();
+            assert!(module_fields("fans").iter().all(|field| rows.iter().any(|row| matches!(row, Row::ModuleChoice(id, f) if id == "fans" && f == field))));
+            ui.draw(Instant::now());
+        });
+        let (cw,ch,scale) = with_ui(|ui| { let (w,h) = ui.client(); (w,h,ui.scale) }).unwrap();
+        let size = ((cw*scale).round() as u32, (ch*scale).round() as u32);
+        let pixels = gfx.draw_offscreen(size, scale, |frame| {
+            with_ui(|ui| {
+                fill(frame, ui.palette.window, 0.0, 0.0, cw, ch, 0.0);
+                ui.paint(frame, Instant::now());
+                assert_eq!(ui.targets.iter().filter(|(_,t)| matches!(t, Target::Choice(Field::FanPresets, _))).count(), crate::fan_settings::PRESETS.len());
+            });
+        }).unwrap();
+        let out = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/fan-settings.png");
+        std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+        crate::studio::save_png(&out, size.0, size.1, &pixels).unwrap();
+        unsafe { let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd); }
+    }
 
     #[test]
     #[ignore = "draws on this PC's graphics card, to pictures to be looked at"]

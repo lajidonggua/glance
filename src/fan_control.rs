@@ -38,6 +38,7 @@ struct Saved {
 
 #[derive(Default)]
 pub struct Controller {
+    pub rules: crate::fan_settings::FanRules,
     plans: Vec<Plan>,
     owned: BTreeMap<u8, Saved>,
     pub failed: bool,
@@ -129,6 +130,7 @@ impl Controller {
 
     pub fn apply(&mut self, io: &impl Registers, command: FanCommand, active: u32, temperature: Option<f32>) -> Result<(), ()> {
         match command {
+            FanCommand::Rules(rules) => { if !rules.valid() { return Err(()); } self.rules = rules; return Ok(()); }
             FanCommand::RestoreAll => {
                 if self.restore_all(io) { self.failed = false; return Ok(()); }
                 return Err(());
@@ -139,8 +141,8 @@ impl Controller {
                 return Ok(());
             }
             FanCommand::Fixed { channel, percent } => {
-                if !(40..=100).contains(&percent) || channel >= 32 || active & (1 << channel) == 0 { return Err(()); }
-                let temperature = temperature.filter(|t| t.is_finite() && *t > 0.0 && *t < 90.0).ok_or(())?;
+                if !(20..=100).contains(&percent) || channel >= 32 || active & (1 << channel) == 0 { return Err(()); }
+                let temperature = temperature.filter(|t| t.is_finite() && *t > 0.0 && *t < self.rules.restore_at.min(90) as f32).ok_or(())?;
                 let plan = *self.plans.get(channel as usize).ok_or(())?;
                 if let Some(saved) = self.owned.get_mut(&channel) {
                     if saved.restoring { return Err(()); }
@@ -159,7 +161,7 @@ impl Controller {
                 }
                 let saved = self.owned.get_mut(&channel).unwrap();
                 saved.requested = percent;
-                let duty = ((if temperature >= 80.0 { 100 } else { percent }) as u32 * 255 + 50) / 100;
+                let duty = ((if temperature >= self.rules.full_at as f32 { 100 } else { percent }) as u32 * 255 + 50) / 100;
                 let desired = [plan.manual.unwrap_or(saved.bytes[0].2 & 0x7f), duty as u8, plan.enable.map_or(0, |(_, mask)| mask)];
                 // Remember a byte immediately after writing it, so a failed
                 // later write can still restore the earlier ones.
@@ -174,7 +176,7 @@ impl Controller {
 
     pub fn maintain(&mut self, io: &impl Registers, active: u32, temperature: Option<f32>, rpms: impl Fn(u8) -> Option<f32>, now: Instant) {
         if self.owned.is_empty() { return; }
-        if temperature.is_none_or(|t| !t.is_finite() || t >= 90.0 || t <= 0.0) {
+        if temperature.is_none_or(|t| !t.is_finite() || t >= self.rules.restore_at.min(90) as f32 || t <= 0.0) {
             self.restore_all(io);
             self.failed = true;
             return;
@@ -202,7 +204,8 @@ impl Controller {
             let owned = self.owned.get(&(i as u8));
             let mode = io.get(plan.mode).ok();
             FanControl { channel: i as u8, name: name(i as u8), percent: owned.and_then(|_| io.get(plan.duty).ok()).map(|v| ((v as u32 * 100 + 127) / 255) as u8),
-                manual: owned.is_some(), available: temperature.is_some_and(|t| t.is_finite() && t > 0.0 && t < 90.0) && mode.is_some_and(|m| owned.is_some() || m & plan.auto_mask != 0), linked: false }
+                manual: owned.is_some(), available: temperature.is_some_and(|t| t.is_finite() && t > 0.0 && t < self.rules.restore_at.min(90) as f32) && mode.is_some_and(|m| owned.is_some() || m & plan.auto_mask != 0), linked: false,
+                can_stop: false, requested_percent: owned.map(|s| s.requested) }
         }).collect()
     }
 }
@@ -230,13 +233,20 @@ pub fn menu(channel: u8, at: windows::Win32::Foundation::POINT, with_panel: bool
     let lang = crate::update::language();
     let mut rows = vec![(FanCommand::Automatic(channel), lang.pick("恢复自动", "Restore automatic"), !control.manual)];
     if control.available {
-        let labels = if control.linked { [(40, lang.pick("40% · 两路联动", "40% · Linked fans")), (60, lang.pick("60% · 两路联动", "60% · Linked fans")), (80, lang.pick("80% · 两路联动", "80% · Linked fans")), (100, lang.pick("100% · 两路联动", "100% · Linked fans"))] }
-            else { [(40, "40%"), (60, "60%"), (80, "80%"), (100, "100%")] };
-        rows.extend(labels.into_iter().map(|(percent, label)|
-            (FanCommand::Fixed { channel, percent }, label, control.manual && control.percent == Some(percent))));
+        let settings = crate::app().settings.lock().unwrap().fans.clone();
+        rows.extend(settings.presets().into_iter().filter(|p| *p != 0 || control.can_stop).map(|percent|
+            (FanCommand::Fixed { channel, percent }, preset_label(percent, control.linked, lang), control.manual && control.requested_percent.or(control.percent) == Some(percent))));
     } else if !control.manual { return None; }
     let items = rows.iter().enumerate().map(|(i, (_, label, checked))| Item { label, checked: *checked, mark: None, rule_before: i == 1 }).collect();
     Some((Menu::open_at(items, look, at, false, with_panel)?, rows.into_iter().map(|(command, ..)| command).collect()))
+}
+
+fn preset_label(percent: u8, linked: bool, lang: crate::ui::text::Lang) -> &'static str {
+    let at = crate::fan_settings::PRESETS.iter().position(|p| *p == percent).unwrap();
+    if !linked { return ["0%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "90%", "100%"][at]; }
+    let zh = ["0% · 低温停转（联动）", "20% · 两路联动", "30% · 两路联动", "40% · 两路联动", "50% · 两路联动", "60% · 两路联动", "70% · 两路联动", "80% · 两路联动", "90% · 两路联动", "100% · 两路联动"];
+    let en = ["0% · Stop when cool (linked)", "20% · Linked fans", "30% · Linked fans", "40% · Linked fans", "50% · Linked fans", "60% · Linked fans", "70% · Linked fans", "80% · Linked fans", "90% · Linked fans", "100% · Linked fans"];
+    lang.pick(zh[at], en[at])
 }
 
 #[cfg(test)]

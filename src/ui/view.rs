@@ -2773,6 +2773,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             if rows.is_empty() { return None; }
             let hint = if failed { lang.pick("调节未生效", "Control failed") }
                 else if board.is_some_and(|b| b.fan_control_busy) { lang.pick("其他程序控制", "Another controller") }
+                else if controls.iter().any(|c| c.manual && c.requested_percent == Some(0) && c.percent != Some(0)) { lang.pick("升温自动起转", "Running for cooling") }
                 else if adjustable && controls.iter().any(|c| c.linked) { lang.pick("点击调节 · 两路联动", "Click to adjust · Linked") }
                 else if adjustable { lang.pick("点击调节", "Click to adjust") }
                 else { lang.pick("只读", "Read only") };
@@ -6475,7 +6476,7 @@ otepad.exe", "Notepad"),
         let mut live = sample(None, None, Some(1200.0));
         let board = live.board.as_mut().unwrap();
         board.fans.push(("2".into(), 0.0));
-        board.fan_controls.push(FanControl { channel: 0, name: "1".into(), percent: Some(60), manual: true, available: true, linked: false });
+        board.fan_controls.push(FanControl { channel: 0, name: "1".into(), percent: Some(60), manual: true, available: true, linked: false, can_stop: false, requested_percent: Some(60) });
         live.gpus[0].fan_rpm = Some(950);
         for detail in [Detail::Full, Detail::Compact] {
             let s = scene(leak(vec![live.clone()]));
