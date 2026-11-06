@@ -82,7 +82,7 @@ Partial writes and failed restores retain their recovery state for a retry.
 At the configured full-output board temperature (default 80°C), output
 becomes 100%; recovery is capped at 90°C for these adapters. Missing
 temperature or five seconds without a turning fan also make the
-worker requests restore. These are board sensor readings, not an assurance
+worker request restore. These are board sensor readings, not an assurance
 that every component's temperature is covered. Unlike the Redmi adapter,
 these motherboard adapters do not yet have independent crash recovery. If
 their sensor process is forcibly terminated, fixed output can remain until
@@ -108,6 +108,16 @@ hardware read confirmed that the guardian had cleared the mode bit and
 both targets, and released ownership. No heat/load test or real stall was
 induced. Other motherboard control adapters have only mock-register tests
 in this change, rather than equivalent hardware validation.
+
+On 2026-11-06, the v2 low-output checks also passed on this TM2113:
+20% ended at 1770/1644 RPM and 30% at 2576/2356 RPM, with both channels
+reporting the requested output. The 0% check ran below 45°C and measured
+both fans at 0 RPM for eleven successive samples. Each preset restored
+automatic afterwards. A separate final read confirmed the manual bit was
+clear, both targets were zero and the control ownership lock was free.
+The control samples stayed at or below 42.625°C. High-temperature and
+physical-stall responses were not induced; their earlier offline tests
+remain separate from this bounded hardware check.
 
 The Redmi implementation is adapted from the MIT-licensed RedmiFanControl
 protocol. Its [copyright and license](redmi-fan-control-LICENSE.txt) are
