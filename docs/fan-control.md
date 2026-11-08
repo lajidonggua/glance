@@ -63,9 +63,10 @@ the hard 95°C ceiling. The worker and guardian receive the same validated
 rules; manual output is never started simply by saving preferences.
 The menu checks the requested preset while the row shows effective output.
 
-Temperature increases ramp output by at most five percentage points every
-500 ms, including a sudden jump in the temperature reading. Intentional zero
-output while cool is not a stall. Starting a stopped fan
+After a stopped fan starts at the minimum supported 20%, output increases are
+limited to five percentage points every 500 ms, including a sudden jump in
+the temperature reading. Intentional zero output while cool is not a stall.
+Starting a stopped fan
 tries the temperature-constrained output for a second, then progressively
 boosts to at least 30/40/60/80/100% only while a fan remains stopped. Both
 turning ends the boost immediately. Failure to start within twelve seconds
