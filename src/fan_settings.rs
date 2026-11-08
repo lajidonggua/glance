@@ -33,10 +33,14 @@ impl FanRules {
     }
     pub fn checked(self) -> Self { if self.valid() { self } else { Self::default() } }
     pub fn minimum(self, temperature: f32) -> u8 {
-        if temperature >= self.full_at as f32 { 100 }
-        else if temperature >= self.boost_at as f32 { 30 }
-        else if temperature >= self.stop_below as f32 { 20 }
-        else { 0 }
+        fn between(t: f32, from_t: u8, from: u8, to_t: u8, to: u8) -> u8 {
+            let progress = (t - from_t as f32) / (to_t - from_t) as f32;
+            (from as f32 + progress * (to - from) as f32).round() as u8
+        }
+        if temperature < self.stop_below as f32 { 0 }
+        else if temperature < self.boost_at as f32 { between(temperature, self.stop_below, 20, self.boost_at, 30) }
+        else if temperature < self.full_at as f32 { between(temperature, self.boost_at, 30, self.full_at, 100) }
+        else { 100 }
     }
 }
 

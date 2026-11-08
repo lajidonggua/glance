@@ -685,6 +685,11 @@ pub fn run_sensors() {
         return;
     }
     #[cfg(feature = "studio")]
+    if std::env::args().nth(1).as_deref() == Some("--redmi-fan-restore-automatic") {
+        if let Some(path) = std::env::args_os().nth(2) { redmi_fans::diagnose_recovery(std::path::Path::new(&path)); }
+        return;
+    }
+    #[cfg(feature = "studio")]
     if std::env::args().nth(1).as_deref() == Some("--redmi-fan-verify-low") {
         if let Some(path) = std::env::args_os().nth(2) { redmi_fans::verify_low(std::path::Path::new(&path)); }
         return;

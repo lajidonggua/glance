@@ -44,18 +44,31 @@ RedmiFanControl is running, Glance can still show RPM but says **Another
 controller**. Exit that tool normally before using Glance's adjustment menu;
 there is no need to stop its processes forcibly.
 
-Default CPU Tctl thresholds are: stop only below 50°C, at least 20% from
-50°C, at least 30% from 60°C, 100% from 80°C, and automatic recovery at
+An EC can be manual while the current worker has no ownership of that
+setting. Older builds showed only "Read only" and offered no recovery.
+The validated Redmi adapter now shows "Click to restore automatic" when
+the ownership lock is free. This menu offers only an explicit firmware
+automatic recovery, followed by the normal preset menu once confirmed.
+Startup and preference changes never perform that recovery. The action
+takes exclusive ownership, verifies two matching snapshots, and clears the
+manual bit before cleaning the targets, preserving unrelated flags. Changed
+targets or an occupied ownership lock block recovery. It is not offered on
+generic motherboard interfaces whose firmware defaults are unknown.
+
+Default CPU Tctl thresholds are: stop only below 50°C, ramp from 20% at
+50°C to 30% at 60°C, then ramp to 100% at 80°C, and automatic recovery at
 95°C. Settings offer stop at 35–55°C, the 30% floor at 60–70°C, full output
 at 75–85°C and recovery at 90–95°C. Invalid or unordered rules cannot raise
 the hard 95°C ceiling. The worker and guardian receive the same validated
 rules; manual output is never started simply by saving preferences.
 The menu checks the requested preset while the row shows effective output.
 
-Intentional zero output while cool is not a stall. Starting a stopped fan
+Temperature increases ramp output by at most five percentage points every
+500 ms, including a sudden jump in the temperature reading. Intentional zero
+output while cool is not a stall. Starting a stopped fan
 tries the temperature-constrained output for a second, then progressively
 boosts to at least 30/40/60/80/100% only while a fan remains stopped. Both
-turning ends the boost immediately. Failure to start within eight seconds
+turning ends the boost immediately. Failure to start within twelve seconds
 restores automatic; a later sustained stall still has a five-second limit.
 At the recovery threshold, missing CPU or
 RPM readings, a stall or a lost UI connection, the worker

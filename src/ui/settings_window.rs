@@ -3302,7 +3302,7 @@ impl Ui {
                 let (name, values, value): (&'static str, &[u8], u8) = match field {
                     Field::FanStop => (pick(lang, "低于此温度允许停转", "Fan stop below"), &[35,40,45,50,55], rules.stop_below),
                     Field::FanBoost => (pick(lang, "达到此温度至少30%", "At least 30% from"), &[60,65,70], rules.boost_at),
-                    Field::FanFull => (pick(lang, "达到此温度满速", "Full speed from"), &[75,80,85], rules.full_at),
+                    Field::FanFull => (pick(lang, "达到此温度升至满速", "Full speed at"), &[75,80,85], rules.full_at),
                     _ => (pick(lang, "达到此温度恢复自动", "Restore automatic from"), &[90,95], rules.restore_at),
                 };
                 (name, values.iter().map(|v| format!("{v} °C")).collect(), values.iter().position(|v| *v == value))
@@ -3968,7 +3968,7 @@ impl Ui {
                 Some(p("未能读取主板传感器，原因见“通用”页中的诊断信息", "This board's sensors could not be read. The diagnostics on the General page say why")),
             ),
             "board" => (p("主板", "Motherboard"), (!info.board.is_empty()).then(|| info.board.clone())),
-            "fans" => (p("风扇", "Fans"), Some(p("展开可选菜单档位和温度规则；停转与低速规则适用于 Redmi 两路联动", "Expand for menu presets and thermal rules; fan stop and low-speed rules apply to linked Redmi fans"))),
+            "fans" => (p("风扇", "Fans"), Some(p("展开可选菜单档位和温度规则；Redmi 两路风扇会随温度渐增，到满速温度时才升至 100%", "Expand for menu presets and thermal rules; linked Redmi fans ramp with temperature and reach 100% at the full-speed threshold"))),
             "battery" => (p("电池", "Battery"), Some(p("电量、充放电功率与健康度", "Charge, power and health"))),
             "game" => (p("游戏", "Game"), Some(p("全屏游戏的帧率、帧时间与资源占用", "A fullscreen game's frame rate, frame times and use"))),
             "docker" => ("Docker".into(), Some(p("运行中容器的处理器、内存、网络与磁盘占用，仅在 Docker 运行时显示", "What each running container uses of the processor, memory, network and disk, shown only while Docker runs"))),

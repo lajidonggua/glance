@@ -455,6 +455,7 @@ impl SuperIo {
     }
 
     fn control(&mut self, command: crate::reading::FanCommand) -> bool {
+        if matches!(command, crate::reading::FanCommand::RecoverAutomatic) { return false; }
         if let crate::reading::FanCommand::Rules(rules) = command {
             if !rules.valid() { return false; } self.control.rules = rules; return true;
         }

@@ -28,7 +28,7 @@ use crate::presents::GameMode;
 use crate::reading::{Sample, StaticInfo};
 
 /// Replace an older helper before sending fan-control commands.
-pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/fans-v2");
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/fans-v3");
 
 /// What the sensors tell.
 #[derive(Serialize, Deserialize)]

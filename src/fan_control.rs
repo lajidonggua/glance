@@ -32,8 +32,25 @@ struct Saved {
     bytes: Vec<(u16, u8, u8, u8)>,
     requested: u8,
     stalled: Option<Instant>,
+    last_step: Instant,
     pending: Option<(usize, u8)>,
     restoring: bool,
+}
+
+const RAMP_INTERVAL: Duration = Duration::from_millis(500);
+
+fn ramp_percent(current: u8, target: u8, elapsed: Duration) -> u8 {
+    if current == target { return current; }
+    let intervals = elapsed.as_millis() / RAMP_INTERVAL.as_millis();
+    if intervals == 0 { return current; }
+    let step = intervals.saturating_mul(5).min(100) as u8;
+    if target > current {
+        if current == 0 { target.min(step.max(20)) } else { current.saturating_add(step).min(target) }
+    } else if target == 0 && current <= step.max(20) {
+        0
+    } else {
+        current.saturating_sub(step).max(target).max(20)
+    }
 }
 
 #[derive(Default)]
@@ -130,6 +147,7 @@ impl Controller {
 
     pub fn apply(&mut self, io: &impl Registers, command: FanCommand, active: u32, temperature: Option<f32>) -> Result<(), ()> {
         match command {
+            FanCommand::RecoverAutomatic => return Err(()), // No known firmware restore protocol on these boards.
             FanCommand::Rules(rules) => { if !rules.valid() { return Err(()); } self.rules = rules; return Ok(()); }
             FanCommand::RestoreAll => {
                 if self.restore_all(io) { self.failed = false; return Ok(()); }
@@ -157,12 +175,24 @@ impl Controller {
                     let pwm = io.get(plan.duty)?;
                     let mut bytes = vec![(plan.mode, 0xff, mode, mode), (plan.duty, 0xff, pwm, pwm)];
                     if let Some((reg, mask)) = plan.enable { let value = io.get(reg)?; bytes.push((reg, mask, value, value)); }
-                    self.owned.insert(channel, Saved { bytes, requested: percent, stalled: None, pending: None, restoring: false });
+                    let now = Instant::now();
+                    self.owned.insert(channel, Saved { bytes, requested: percent, stalled: None, last_step: now.checked_sub(RAMP_INTERVAL).unwrap_or(now), pending: None, restoring: false });
                 }
                 let saved = self.owned.get_mut(&channel).unwrap();
                 saved.requested = percent;
-                let duty = ((if temperature >= self.rules.full_at as f32 { 100 } else { percent }) as u32 * 255 + 50) / 100;
-                let desired = [plan.manual.unwrap_or(saved.bytes[0].2 & 0x7f), duty as u8, plan.enable.map_or(0, |(_, mask)| mask)];
+                let target = percent.max(self.rules.minimum(temperature));
+                let current = ((saved.bytes[1].3 as u32 * 100 + 127) / 255) as u8;
+                let now = Instant::now();
+                let elapsed = now.saturating_duration_since(saved.last_step);
+                let effective = ramp_percent(current, target, elapsed);
+                if effective != current {
+                    let intervals = elapsed.as_millis() / RAMP_INTERVAL.as_millis();
+                    saved.last_step += Duration::from_millis((intervals * RAMP_INTERVAL.as_millis()).min(u64::MAX as u128) as u64);
+                } else if effective == target {
+                    saved.last_step = now;
+                }
+                let duty = ((effective as u32 * 255 + 50) / 100) as u8;
+                let desired = [plan.manual.unwrap_or(saved.bytes[0].2 & 0x7f), duty, plan.enable.map_or(0, |(_, mask)| mask)];
                 // Remember a byte immediately after writing it, so a failed
                 // later write can still restore the earlier ones.
                 for (i, &(_, mask, _, last)) in saved.bytes.clone().iter().enumerate() {
@@ -205,7 +235,7 @@ impl Controller {
             let mode = io.get(plan.mode).ok();
             FanControl { channel: i as u8, name: name(i as u8), percent: owned.and_then(|_| io.get(plan.duty).ok()).map(|v| ((v as u32 * 100 + 127) / 255) as u8),
                 manual: owned.is_some(), available: temperature.is_some_and(|t| t.is_finite() && t > 0.0 && t < self.rules.restore_at.min(90) as f32) && mode.is_some_and(|m| owned.is_some() || m & plan.auto_mask != 0), linked: false,
-                can_stop: false, requested_percent: owned.map(|s| s.requested) }
+                can_stop: false, requested_percent: owned.map(|s| s.requested), can_restore_automatic: false }
         }).collect()
     }
 }
@@ -231,6 +261,10 @@ pub fn menu(channel: u8, at: windows::Win32::Foundation::POINT, with_panel: bool
     use crate::ui::menu::{Item, Menu};
     let control = crate::app().controller.history.read().unwrap().back()?.board.as_ref()?.fan_controls.iter().find(|c| c.channel == channel)?.clone();
     let lang = crate::update::language();
+    if control.can_restore_automatic {
+        let label = lang.pick("恢复系统自动（解除手动状态）", "Restore firmware automatic (clear manual mode)");
+        return Some((Menu::open_at(vec![Item { label, checked: false, mark: None, rule_before: false }], look, at, false, with_panel)?, vec![FanCommand::RecoverAutomatic]));
+    }
     let mut rows = vec![(FanCommand::Automatic(channel), lang.pick("恢复自动", "Restore automatic"), !control.manual)];
     if control.available {
         let settings = crate::app().settings.lock().unwrap().fans.clone();
@@ -265,7 +299,7 @@ mod tests {
         assert!(c.apply(&io, FanCommand::Fixed { channel: 7, percent: 40 }, 1, Some(45.0)).is_err());
         assert!(c.apply(&io, FanCommand::Fixed { channel: 0, percent: 0 }, 1, Some(45.0)).is_err());
         c.apply(&io, FanCommand::Fixed { channel: 0, percent: 40 }, 1, Some(45.0)).unwrap();
-        assert_eq!((io.get(0x102), io.get(0x109)), (Ok(0), Ok(102)));
+        assert_eq!((io.get(0x102), io.get(0x109)), (Ok(0), Ok(168)));
         assert!(c.restore_all(&io));
         assert_eq!((io.get(0x102), io.get(0x109)), (Ok(0x40), Ok(180)));
     }
@@ -284,7 +318,7 @@ mod tests {
         let io = Fake(RefCell::new(BTreeMap::from([(0x15, 0x80), (0x63, 180), (0x13, 0xa0)])));
         let mut c = Controller::ite(0x8686, 6, "ASRock");
         c.apply(&io, FanCommand::Fixed { channel: 0, percent: 40 }, 1, Some(85.0)).unwrap();
-        assert_eq!(io.get(0x63), Ok(255));
+        assert_eq!(io.get(0x63), Ok(194));
         io.put(0x13, 0xa3).unwrap(); // A different channel's enable bit.
         c.maintain(&io, 1, None, |_| Some(1200.0), Instant::now());
         assert_eq!((io.get(0x13), io.get(0x15), io.get(0x63)), (Ok(0xa2), Ok(0x80), Ok(180)));
@@ -296,14 +330,14 @@ mod tests {
     fn heat_overrides_output_and_a_stalled_fan_returns_to_firmware() {
         let io = Fake(RefCell::new(BTreeMap::from([(0x102, 0x40), (0x109, 180)])));
         let mut c = Controller::nuvoton(0xd428, 7);
-        let now = Instant::now();
+        let now = Instant::now() + Duration::from_millis(700);
         c.apply(&io, FanCommand::Fixed { channel: 0, percent: 60 }, 1, Some(45.0)).unwrap();
         c.maintain(&io, 1, Some(81.0), |_| Some(1200.0), now);
-        assert_eq!(io.get(0x109), Ok(255));
-        c.maintain(&io, 1, Some(70.0), |_| Some(1200.0), now);
-        assert_eq!(io.get(0x109), Ok(153));
-        c.maintain(&io, 1, Some(70.0), |_| Some(0.0), now);
-        c.maintain(&io, 1, Some(70.0), |_| None, now + Duration::from_secs(5));
+        assert_eq!(io.get(0x109), Ok(181)); // One 5-point step, not an immediate 100% jump.
+        c.maintain(&io, 1, Some(70.0), |_| Some(1200.0), now + RAMP_INTERVAL);
+        assert_eq!(io.get(0x109), Ok(168));
+        c.maintain(&io, 1, Some(70.0), |_| Some(0.0), now + RAMP_INTERVAL * 2);
+        c.maintain(&io, 1, Some(70.0), |_| None, now + RAMP_INTERVAL * 2 + Duration::from_secs(5));
         assert_eq!((io.get(0x102), io.get(0x109)), (Ok(0x40), Ok(180)));
         assert!(c.failed && c.owned.is_empty());
         for t in [None, Some(f32::NAN), Some(90.0), Some(0.0)] {
@@ -349,7 +383,7 @@ mod tests {
         let mut c = Controller::ite(0x8686, 6, "ASRock");
         for channel in [0, 1] { c.apply(&io, FanCommand::Fixed { channel, percent: 60 }, 3, Some(45.0)).unwrap(); }
         c.apply(&io, FanCommand::Automatic(0), 3, None).unwrap();
-        assert_eq!((io.get(0x13), io.get(0x16), io.get(0x6b)), (Ok(0xa2), Ok(0), Ok(153)));
+        assert_eq!((io.get(0x13), io.get(0x16), io.get(0x6b)), (Ok(0xa2), Ok(0), Ok(179)));
         assert!(c.restore_all(&io));
         assert_eq!(io.get(0x13), Ok(0xa0));
     }
@@ -358,7 +392,7 @@ mod tests {
     fn older_readings_are_read_only_and_commands_round_trip() {
         let board: crate::reading::BoardSensors = serde_json::from_str(r#"{"temps":[],"fans":[["1",1200.0]]}"#).unwrap();
         assert!(board.fan_controls.is_empty() && !board.fan_control_failed);
-        for command in [FanCommand::RestoreAll, FanCommand::Automatic(2), FanCommand::Fixed { channel: 1, percent: 80 }] {
+        for command in [FanCommand::RestoreAll, FanCommand::RecoverAutomatic, FanCommand::Automatic(2), FanCommand::Fixed { channel: 1, percent: 80 }] {
             let json = serde_json::to_string(&command).unwrap();
             assert_eq!(serde_json::to_string(&serde_json::from_str::<FanCommand>(&json).unwrap()).unwrap(), json);
         }

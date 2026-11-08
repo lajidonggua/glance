@@ -2761,7 +2761,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                 let control = controls.iter().find(|c| c.name == *name);
                 let mut value = shown(rpm, |rpm| format!("{rpm:.0} RPM"));
                 if let Some(c) = control {
-                    if c.manual {
+                    if c.manual || c.can_restore_automatic {
                         if let Some(percent) = c.percent { value.push_str(&format!(" · {percent}%")); }
                     } else if c.available { value.push_str(lang.pick(" · 自动", " · Auto")); }
                 }
@@ -2773,6 +2773,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             if rows.is_empty() { return None; }
             let hint = if failed { lang.pick("调节未生效", "Control failed") }
                 else if board.is_some_and(|b| b.fan_control_busy) { lang.pick("其他程序控制", "Another controller") }
+                else if controls.iter().any(|c| c.can_restore_automatic) { lang.pick("点击恢复系统自动", "Click to restore automatic") }
                 else if controls.iter().any(|c| c.manual && c.requested_percent == Some(0) && c.percent != Some(0)) { lang.pick("升温自动起转", "Running for cooling") }
                 else if adjustable && controls.iter().any(|c| c.linked) { lang.pick("点击调节 · 两路联动", "Click to adjust · Linked") }
                 else if adjustable { lang.pick("点击调节", "Click to adjust") }
@@ -3974,7 +3975,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
 fn fan_hit(scene: &Scene, row: usize) -> Option<u8> {
     let name = scene.seen.board.as_ref()?.fans.get(row)?;
     scene.history.last()?.board.as_ref()?.fan_controls.iter()
-        .find(|c| c.name == *name && (c.available || c.manual)).map(|c| c.channel)
+        .find(|c| c.name == *name && (c.available || c.manual || c.can_restore_automatic)).map(|c| c.channel)
 }
 
 /// The station's head (see `Block::Tabs`) on the head row at `top`, from `left`, `width` across: its pages' tabs,
@@ -6476,7 +6477,7 @@ otepad.exe", "Notepad"),
         let mut live = sample(None, None, Some(1200.0));
         let board = live.board.as_mut().unwrap();
         board.fans.push(("2".into(), 0.0));
-        board.fan_controls.push(FanControl { channel: 0, name: "1".into(), percent: Some(60), manual: true, available: true, linked: false, can_stop: false, requested_percent: Some(60) });
+        board.fan_controls.push(FanControl { channel: 0, name: "1".into(), percent: Some(60), manual: true, available: true, linked: false, can_stop: false, requested_percent: Some(60), can_restore_automatic: false });
         live.gpus[0].fan_rpm = Some(950);
         for detail in [Detail::Full, Detail::Compact] {
             let s = scene(leak(vec![live.clone()]));
@@ -6494,6 +6495,28 @@ otepad.exe", "Notepad"),
         let s = scene(leak(vec![sample(None, None, Some(900.0))]));
         assert_eq!(fan_hit(&s, 0), None); // A read-only laptop fan.
         assert_eq!(facts(&lane(&s, "fans", Detail::Compact).unwrap()), [("Fan 1".into(), "900 RPM".into())]);
+    }
+
+    #[test]
+    fn unclaimed_manual_fans_offer_recovery_and_busy_controllers_stay_read_only() {
+        use crate::reading::FanControl;
+        let (info,prefs,theme)=(info(),Prefs::default(),Theme::new(Skin::Paper,false));
+        let leak=|history:Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
+        let scene=|history:&'static [Sample]| Scene { music_apart:false,hint:None,info:&info,prefs:&prefs,theme:&theme,lang:Lang::En,history,seen:Box::leak(Box::new(Seen::of(history))),pen_ms:0.0,scrolls:Scrolls::default(),tab:Tab::Shelf,hover:None,thumbs:&RESTING,pinned:false,overlay:false,buttons:true,newer:false,settings_lit:None };
+        let mut unclaimed=sample(None,None,Some(3000.0));
+        unclaimed.board.as_mut().unwrap().fan_controls.push(FanControl {channel:0,name:"1".into(),percent:Some(40),manual:false,available:false,linked:true,can_stop:true,requested_percent:None,can_restore_automatic:true});
+        for detail in [Detail::Full,Detail::Compact] {
+            let s=scene(leak(vec![unclaimed.clone()]));
+            let blocks=lane(&s,"fans",detail).unwrap();
+            assert!(matches!(&blocks[0],Block::Head{aside,..} if aside=="Click to restore automatic"));
+            assert_eq!(facts(&blocks),[("Fan 1".into(),"3000 RPM · 40%".into())]);
+            assert_eq!(fan_hit(&s,0),Some(0));
+        }
+        let mut busy=unclaimed.clone();
+        let b=busy.board.as_mut().unwrap(); b.fan_control_busy=true; b.fan_controls[0].can_restore_automatic=false;
+        let s=scene(leak(vec![unclaimed,busy]));
+        assert_eq!(fan_hit(&s,0),None);
+        assert!(matches!(&lane(&s,"fans",Detail::Full).unwrap()[0],Block::Head{aside,..} if aside=="Another controller"));
     }
 
     #[test]

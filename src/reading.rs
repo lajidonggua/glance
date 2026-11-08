@@ -349,12 +349,17 @@ pub struct FanControl {
     pub can_stop: bool,
     #[serde(default)]
     pub requested_percent: Option<u8>,
+    /// A validated controller is manual, but this process does not own it.
+    /// Only an explicit user request may return it to firmware automatic.
+    #[serde(default)]
+    pub can_restore_automatic: bool,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum FanCommand {
     Rules(crate::fan_settings::FanRules),
     Automatic(u8),
+    RecoverAutomatic,
     Fixed { channel: u8, percent: u8 },
     RestoreAll,
 }
